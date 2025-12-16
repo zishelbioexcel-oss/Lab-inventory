@@ -135,7 +135,7 @@ with tab1:
                     st.error(f"업로드 실패: {e}")
 
 # ==============================================================================
-# [Tab 2] 입고 및 사용 등록 (핵심 기능)
+# [Tab 2] 입고 및 사용 등록 (정수 단위 & 스마트 Lot 선택 적용)
 # ==============================================================================
 with tab2:
     st.header("📦 자재 수불 관리 (Transaction)")
@@ -154,56 +154,76 @@ with tab2:
         # 2. 품목 선택
         selected_product = col2.selectbox("품목 선택", products)
         
-        # 품목 상세 정보 가져오기
+        # 품목 상세 정보 가져오기 & Cat. No. 표시 (사용자 확인용)
         item_info = df_master[df_master['제품명'] == selected_product].iloc[0]
         unit = item_info['단위']
+        cat_no = item_info['Cat. No.']
+        
+        # [신규] 선택한 제품의 정보(Cat. No.)를 보여줍니다.
+        st.info(f"ℹ️ 선택된 제품: **{selected_product}** (Cat. No.: **{cat_no}**, 단위: {unit})")
         
         st.divider()
         
-        # 3. 입력 폼 (입고냐 사용이냐에 따라 다르게 보임)
+        # 3. 입력 폼
         with st.form("action_form", clear_on_submit=True):
             c1, c2, c3 = st.columns(3)
             
-            qty = c1.number_input(f"수량 ({unit})", min_value=0.1, step=1.0)
+            # [수정 1] 수량 입력을 '정수(Integer)'로 강제 (step=1, format="%d")
+            # 초기값(value)은 0으로 설정
+            qty = c1.number_input(f"수량 ({unit})", min_value=0, step=1, value=0, format="%d")
             user = c2.text_input("담당자", value="관리자")
             
-            # 입고일 때는 Lot와 유효기간이 필수 / 사용일 때는 Lot 선택
+            # [수정 2] Lot 번호 처리 방식 개선
             lot_input = "Initial"
             expiry_input = "-"
             
             if "입고" in action_type:
+                # 입고 시에는 새로운 Lot 번호를 직접 입력 (기본값: 오늘날짜)
                 lot_input = c3.text_input("Lot 번호 (새로 입력)", value=datetime.now().strftime("%Y%m%d"))
                 expiry_input = st.date_input("유효기간 설정", datetime.now()).strftime("%Y-%m-%d")
                 note_label = "비고 (구매처 등)"
             else:
-                # 사용 시에는 기존 Lot 중에서 선택 (구현 간소화를 위해 텍스트 입력 혹은 추후 고도화)
-                # 현재는 단순화를 위해 Lot 직접 입력 혹은 'Any'
-                lot_input = c3.text_input("Lot 번호 (사용할 제품)", value="Initial")
+                # 사용 시에는 '입고된 적이 있는 Lot' 목록을 불러와서 선택하게 함
+                existing_lots = ["Initial"] # 기본값
+                
+                if not df_log.empty:
+                    # 로그에서 해당 제품의 Lot 번호들만 추출
+                    log_filtered = df_log[df_log['제품명'] == selected_product]
+                    if not log_filtered.empty:
+                         # 입고(IN) 기록이 있는 Lot들만 찾아서 리스트업
+                         lots_found = log_filtered['Lot 번호'].unique().tolist()
+                         if lots_found:
+                             existing_lots = sorted(lots_found)
+                
+                # Lot 선택 상자 (Selectbox)로 변경
+                lot_input = c3.selectbox("Lot 번호 (사용할 제품 선택)", existing_lots)
                 note_label = "비고 (실험명 등)"
             
             note = st.text_input(note_label)
             
             # 저장 버튼
             if st.form_submit_button(f"{action_type} 저장하기"):
-                # 사용(출고)일 경우 수량을 음수로 저장
-                final_qty = qty if "입고" in action_type else -qty
-                action_code = "IN" if "입고" in action_type else "OUT"
-                
-                # 로그 저장 순서: [날짜, 구분, 제품명, Lot, 수량, 유효기간, 담당자, 비고]
-                row_data = [
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    action_code,
-                    selected_product,
-                    lot_input,
-                    final_qty,  # 핵심: 입고는 +, 사용은 -
-                    expiry_input,
-                    user,
-                    note
-                ]
-                
-                ws_log.append_row(row_data)
-                st.success(f"✅ {selected_product} {qty}{unit} {action_type} 처리되었습니다.")
-                st.cache_data.clear() # 데이터 갱신
+                if qty <= 0:
+                     st.error("수량은 1 이상이어야 합니다.")
+                else:
+                    # 사용(출고)일 경우 수량을 음수로 저장
+                    final_qty = qty if "입고" in action_type else -qty
+                    action_code = "IN" if "입고" in action_type else "OUT"
+                    
+                    row_data = [
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        action_code,
+                        selected_product,
+                        lot_input,
+                        final_qty,  
+                        expiry_input,
+                        user,
+                        note
+                    ]
+                    
+                    ws_log.append_row(row_data)
+                    st.success(f"✅ {selected_product} (Lot: {lot_input}) {qty}{unit} {action_type} 처리되었습니다.")
+                    st.cache_data.clear() # 데이터 갱신
 
 # ==============================================================================
 # [Tab 3] 실시간 재고 현황 (Dashboard)
@@ -267,6 +287,7 @@ with tab3:
                 st.dataframe(df_log.sort_values(by=df_log.columns[0], ascending=False), use_container_width=True)
             else:
                 st.info("아직 입출고 기록이 없습니다.")
+
 
 
 
