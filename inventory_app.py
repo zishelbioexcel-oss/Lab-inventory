@@ -115,6 +115,11 @@ with tab1:
             try:
                 # 엑셀 읽기
                 df_upload = pd.read_excel(uploaded_file)
+                # 1. 모든 컬럼에서 '-' 문자를 0으로 치환 (숫자 컬럼 계산을 위해)
+                df_upload = df_upload.replace('-', 0)
+                # 2. 혹시 몰라 NaN(빈칸)도 0으로 채우기 (선택사항)
+                df_upload = df_upload.fillna(0)
+                
                 st.write("엑셀 데이터 미리보기:", df_upload.head(3))
                 
                 # 매핑 가이드 (사용자 엑셀 -> 앱 DB)
@@ -353,3 +358,4 @@ with tab3:
         # 보여줄 컬럼 정리
         view_cols = ["제품명", "제조사", "Cat. No.", "Lot 번호", "현재 재고", "단위", "유통기한", "보관 위치"]
         st.dataframe(view_df[view_cols], use_container_width=True, hide_index=True)
+
