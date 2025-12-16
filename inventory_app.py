@@ -62,7 +62,7 @@ if err: st.error(err); st.stop()
 tab1, tab2, tab3 = st.tabs(["📂 BOM(품목) 관리", "📦 입고/사용 등록", "📊 실시간 재고 현황"])
 
 # ==============================================================================
-# [Tab 1] BOM(품목) 관리 - 기준 정보 업로드
+# [Tab 1] BOM(품목) 관리 - 기준 정보 업로드 (NaN 에러 수정판)
 # ==============================================================================
 with tab1:
     st.header("📂 BOM 마스터 데이터 관리")
@@ -71,12 +71,15 @@ with tab1:
     with st.expander("엑셀 BOM 업로드 (기준 정보 갱신)", expanded=True):
         uploaded_file = st.file_uploader("정리된 BOM 엑셀 파일 (.xlsx)", type=['xlsx'])
         if uploaded_file:
+            # 1. 엑셀 읽기
             df_upload = pd.read_excel(uploaded_file)
             df_upload.columns = df_upload.columns.str.strip() # 헤더 공백 제거
             
+            # [핵심 수정] 엑셀의 모든 빈 칸(NaN)을 빈 문자열("")로 일단 변경
+            df_upload = df_upload.fillna("")
+            
             st.write("미리보기:", df_upload.head(3))
             
-            # 매핑: 수량/날짜 컬럼이 사라졌으므로 매핑도 단순해집니다.
             COL_MAP = {
                 "제품명": "품목명", "제조사": "제조사", "Cat. No.": "Cat. No.",
                 "단위": "단위", "보관 위치": "보관 장소", "알림 기준 수량": "안전재고"
@@ -93,11 +96,25 @@ with tab1:
                     
                     for _, row in df_upload.iterrows():
                         p_name = str(row.get(COL_MAP["제품명"], "")).strip()
-                        if not p_name or p_name == "nan": continue
+                        if not p_name or p_name == "nan" or p_name == "": continue
                         
-                        # 안전재고 숫자 처리
-                        try: safe_stock = float(str(row.get(COL_MAP["알림 기준 수량"], 0)).replace("-","0"))
-                        except: safe_stock = 0.0
+                        # [핵심 수정] 안전재고 숫자 변환 로직 강화
+                        # 빈 칸, NaN, 문자 등이 들어와도 무조건 0.0으로 만듦
+                        raw_alert = row.get(COL_MAP["알림 기준 수량"], 0)
+                        
+                        # 값이 비어있거나 문자열 'nan'이면 0.0 처리
+                        if raw_alert == "" or str(raw_alert).lower() == 'nan':
+                            safe_stock = 0.0
+                        else:
+                            try:
+                                # 쉼표(,) 제거 및 하이픈(-) 0 처리 후 실수 변환
+                                safe_stock = float(str(raw_alert).replace("-", "0").replace(",", ""))
+                                # 변환 후에도 혹시 nan이면 0.0 처리 (Python float('nan') 방지)
+                                import math
+                                if math.isnan(safe_stock):
+                                    safe_stock = 0.0
+                            except:
+                                safe_stock = 0.0
 
                         processed.append([
                             p_name,
@@ -105,7 +122,7 @@ with tab1:
                             str(row.get(COL_MAP["Cat. No."], "-")),
                             str(row.get(COL_MAP["단위"], "ea")),
                             str(row.get(COL_MAP["보관 위치"], "-")),
-                            safe_stock,
+                            safe_stock,  # 이제 무조건 깨끗한 숫자(float)만 들어감
                             datetime.now().strftime("%Y-%m-%d"),
                             "관리자(일괄)"
                         ])
@@ -250,5 +267,6 @@ with tab3:
                 st.dataframe(df_log.sort_values(by=df_log.columns[0], ascending=False), use_container_width=True)
             else:
                 st.info("아직 입출고 기록이 없습니다.")
+
 
 
