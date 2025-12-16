@@ -299,15 +299,30 @@ with tab3:
     df_log = load_usage_log(client)
     
     if not df_db.empty:
-        # 재고 계산 로직
+        # ------------------------------------------------------------------
+        # [긴급 수정] 병합(Merge) 에러 방지를 위한 데이터 타입 강제 통일
+        # ------------------------------------------------------------------
+        # 1. Master DB의 키 컬럼을 문자열(String)로 변환
+        df_db['제품명'] = df_db['제품명'].astype(str)
+        df_db['Lot 번호'] = df_db['Lot 번호'].astype(str)
+
+        # 2. Usage Log의 키 컬럼도 문자열(String)로 변환 (데이터가 있을 경우만)
         if not df_log.empty:
+            df_log['제품명'] = df_log['제품명'].astype(str)
+            df_log['Lot 번호'] = df_log['Lot 번호'].astype(str)
+            
+            # 그룹화 및 병합 진행
             usage_grp = df_log.groupby(['제품명', 'Lot 번호'])['사용량'].sum().reset_index()
+            
+            # 이제 타입이 같으므로 에러가 나지 않습니다.
             df_final = pd.merge(df_db, usage_grp, on=['제품명', 'Lot 번호'], how='left')
             df_final['사용량'] = df_final['사용량'].fillna(0)
         else:
             df_final = df_db.copy()
             df_final['사용량'] = 0
             
+        # ------------------------------------------------------------------
+        
         df_final['현재 재고'] = df_final['최초 수량'] - df_final['사용량']
         
         # --- 🚨 자동 알림 로직 ---
@@ -358,4 +373,5 @@ with tab3:
         # 보여줄 컬럼 정리
         view_cols = ["제품명", "제조사", "Cat. No.", "Lot 번호", "현재 재고", "단위", "유통기한", "보관 위치"]
         st.dataframe(view_df[view_cols], use_container_width=True, hide_index=True)
+
 
