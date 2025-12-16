@@ -240,4 +240,5 @@ with tab3:
         
         # (선택 사항) 입출고 히스토리 보기
         with st.expander("📜 상세 입출고 이력 보기"):
-            st.dataframe(df_log.sort_values(by=df_log.columns[0], ascending=False), use
+            st.dataframe(df_log.sort_values(by=df_log.columns[0], ascending=False), use)
+
