@@ -101,123 +101,122 @@ if auth_error_msg:
 tab1, tab2, tab3 = st.tabs(["📝 새 품목/엑셀 등록", "📉 시약 사용", "📊 재고 대시보드"])
 
 # ==============================================================================
-# [Tab 1] 새 품목 등록 & 엑셀 업로드 (수정됨: 매핑 정확도 향상)
+# [Tab 1] 새 품목 등록 & 스마트 엑셀 업로드 (유연성 강화 버전)
 # ==============================================================================
 with tab1:
     st.header("📝 품목 등록 관리")
 
-    # --- 1. 엑셀 일괄 업로드 섹션 ---
-    with st.expander("📂 엑셀 BOM 파일로 일괄 업로드 (추천)", expanded=True):
-        st.info("💡 작성하신 BOM 엑셀 파일을 업로드하면 DB에 한 번에 등록됩니다.")
+    # --- 1. 스마트 엑셀 업로드 섹션 ---
+    with st.expander("📂 엑셀 BOM 파일로 일괄 업로드 (Smart)", expanded=True):
+        st.info("엑셀 파일을 올리고, 어떤 열이 어떤 정보인지 직접 선택하세요.")
         uploaded_file = st.file_uploader("엑셀 파일 선택 (.xlsx)", type=['xlsx'])
         
         if uploaded_file:
             try:
-                # 1. 엑셀 읽기
+                # 엑셀 읽기
                 df_upload = pd.read_excel(uploaded_file)
-                
-                # [중요] 엑셀 헤더의 앞뒤 공백 제거 (실수 방지)
+                # 헤더 공백 제거
                 df_upload.columns = df_upload.columns.str.strip()
                 
-                # [중요] 엑셀 데이터 안의 '-' 문자만 0으로 변경 (수량 계산 오류 방지)
-                # 단, 제품명이나 Cat.No. 같은 텍스트 컬럼은 건드리지 않도록 주의해야 함
-                # 여기서는 안전하게 '숫자 변환' 단계에서 처리하도록 이 줄은 생략하거나, 
-                # 수량 컬럼에 대해서만 replace를 수행하는 것이 좋습니다.
-                # 이번에는 fillna만 처리합니다.
-                df_upload = df_upload.fillna("") 
+                st.write("▼ 엑셀 데이터 미리보기")
+                st.dataframe(df_upload.head(3), use_container_width=True)
+                
+                st.divider()
+                st.subheader("🔗 데이터 연결 (Mapping)")
+                st.write("엑셀의 어느 열(Column)을 앱의 데이터로 쓸지 선택하세요.")
+                
+                excel_cols = list(df_upload.columns)
+                
+                # --- 동적 매핑 선택 UI ---
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    col_name = st.selectbox("1. 제품명(필수) 열 선택", excel_cols, index=excel_cols.index("품목명") if "품목명" in excel_cols else 0)
+                    col_mfg = st.selectbox("2. 제조사 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("제조사") + 1 if "제조사" in excel_cols else 0)
+                    col_cat = st.selectbox("3. Cat. No. 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("Cat. No.") + 1 if "Cat. No." in excel_cols else 0)
+                
+                with c2:
+                    # 여기가 핵심! 사용자가 '용량'이 아니라 '현재고'를 선택하게 유도
+                    col_qty = st.selectbox("4. 재고수량(필수) 열 선택", excel_cols, index=excel_cols.index("현재고") if "현재고" in excel_cols else 0, help="실제 창고에 있는 개수가 적힌 열을 선택하세요.")
+                    col_unit = st.selectbox("5. 단위 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("단위") + 1 if "단위" in excel_cols else 0)
+                    col_lot = st.selectbox("6. Lot 번호 열 선택", ["(없음, Initial로 설정)"] + excel_cols)
+                    
+                with c3:
+                    col_loc = st.selectbox("7. 보관위치 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("보관 장소") + 1 if "보관 장소" in excel_cols else 0)
+                    col_exp = st.selectbox("8. 유효기간 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("유효기간") + 1 if "유효기간" in excel_cols else 0)
+                    col_alert = st.selectbox("9. 안전재고 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("안전재고") + 1 if "안전재고" in excel_cols else 0)
 
-                st.write("엑셀 데이터 미리보기 (상위 3개):", df_upload.head(3))
-                st.write("감지된 엑셀 헤더:", list(df_upload.columns)) # 디버깅용 확인
+                st.warning("⚠️ 주의: 'Google Sheets에 덮어쓰기'를 누르면 기존 DB가 초기화됩니다.")
                 
-                # 2. 매핑 설정 (이미지 기준 정확한 띄어쓰기 적용)
-                # 좌측: 앱 내부 이름 / 우측: 엑셀 헤더 이름
-                COLUMN_MAPPING = {
-                    "제품명": "품목명",       
-                    "제조사": "제조사",
-                    "Cat. No.": "Cat. No.",   # [수정] 띄어쓰기 주의!
-                    "최초 수량": "용량",      
-                    "단위": "단위",
-                    "유통기한": "유효기간",
-                    "보관 위치": "보관 장소",  # [수정] 띄어쓰기 주의!
-                    "알림 기준 수량": "안전재고"
-                }
-                
-                col1, col2 = st.columns(2)
-                registrant_name = col1.text_input("등록자 이름 (일괄 적용)", value="관리자")
-                
-                if st.button("🚀 Google Sheets에 덮어쓰기 (기존 데이터 초기화)"):
+                if st.button("🚀 설정한 대로 업로드하기"):
                     sh = client.open(REAGENT_DB_NAME)
                     sheet = sh.worksheet(REAGENT_DB_TAB)
                     
-                    # 3. 데이터 변환 및 매핑
                     processed_data = []
-                    
-                    # 엑셀에 없는 컬럼이 있을 경우 에러 방지
-                    missing_cols = [v for k, v in COLUMN_MAPPING.items() if v not in df_upload.columns]
-                    if missing_cols:
-                        st.error(f"⚠️ 다음 컬럼을 엑셀에서 찾을 수 없습니다: {missing_cols}")
-                        st.stop()
+                    registrant_name = "관리자(일괄)"
 
                     for index, row in df_upload.iterrows():
-                        # A. 필수값 처리
-                        product_name = str(row.get(COLUMN_MAPPING["제품명"], "")).strip()
-                        if not product_name or product_name == "nan" or product_name == "": continue
-                        
-                        # B. 수치 데이터 안전 변환 (문자 '-'가 들어있으면 0으로)
-                        def safe_float(val):
+                        # 필수값 체크
+                        product_name = str(row[col_name]).strip()
+                        if not product_name or product_name == "nan": continue
+
+                        # 값 추출 함수 (선택 안함인 경우 처리)
+                        def get_val(col_opt, default_val="-"):
+                            if col_opt.startswith("(없음"): return default_val
+                            val = row.get(col_opt, default_val)
+                            return str(val) if pd.notnull(val) else default_val
+
+                        # 수치 변환 함수
+                        def get_num(col_opt):
+                            if col_opt.startswith("(없음"): return 0.0
+                            val = row.get(col_opt, 0)
                             try:
-                                return float(val)
+                                return float(str(val).replace(",", "").replace("-","0"))
                             except:
                                 return 0.0
-                        
-                        initial_qty = safe_float(row.get(COLUMN_MAPPING["최초 수량"]))
-                        alert_qty = safe_float(row.get(COLUMN_MAPPING["알림 기준 수량"]))
 
-                        # C. 날짜 변환
-                        expiry_raw = row.get(COLUMN_MAPPING["유통기한"], "")
-                        expiry_str = ""
-                        if str(expiry_raw).strip() != "" and str(expiry_raw) != "nan":
-                            try:
-                                expiry_str = pd.to_datetime(expiry_raw).strftime("%Y-%m-%d")
-                            except:
-                                expiry_str = str(expiry_raw)
+                        # Lot 번호 처리 (없음 선택시 Initial)
+                        lot_val = get_val(col_lot, "Initial")
+                        if lot_val == "nan" or lot_val == "": lot_val = "Initial"
 
-                        # D. 데이터 조립
                         item = {
                             "제품명": product_name,
-                            "제조사": str(row.get(COLUMN_MAPPING["제조사"], "-")),
-                            "Cat. No.": str(row.get(COLUMN_MAPPING["Cat. No."], "-")), # 매핑된 이름으로 가져옴
-                            "Lot 번호": "Initial", # 엑셀에 Lot 없으면 초기값
-                            "최초 수량": initial_qty,
-                            "단위": str(row.get(COLUMN_MAPPING["단위"], "ea")),
-                            "유통기한": expiry_str,
-                            "보관 위치": str(row.get(COLUMN_MAPPING["보관 위치"], "-")),
+                            "제조사": get_val(col_mfg),
+                            "Cat. No.": get_val(col_cat),
+                            "Lot 번호": lot_val,
+                            "최초 수량": get_num(col_qty),  # 여기서 사용자가 선택한 '현재고' 컬럼의 값을 가져옴
+                            "단위": get_val(col_unit, "ea"),
+                            "유통기한": get_val(col_exp, ""), # 날짜 포맷팅은 필요시 추가
+                            "보관 위치": get_val(col_loc),
                             "등록 날짜": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "등록자": registrant_name,
-                            "알림 기준 수량": alert_qty,
+                            "알림 기준 수량": get_num(col_alert),
                             "알림 무시": "아니요"
                         }
                         
-                        # E. 구글 시트 순서에 맞게 리스트 변환
+                        # 날짜 포맷 정리 (YYYY-MM-DD)
+                        if item["유통기한"] and len(item["유통기한"]) >= 10:
+                             try: item["유통기한"] = pd.to_datetime(item["유통기한"]).strftime("%Y-%m-%d")
+                             except: pass
+
                         row_list = [
                             item["제품명"], item["제조사"], item["Cat. No."], item["Lot 번호"],
                             item["최초 수량"], item["단위"], item["유통기한"], item["보관 위치"],
                             item["등록 날짜"], item["등록자"], item["알림 기준 수량"], item["알림 무시"]
                         ]
                         processed_data.append(row_list)
-                    
-                    # 4. 업로드 실행
+
+                    # 업로드
                     sheet.clear()
                     header = ["제품명", "제조사", "Cat. No.", "Lot 번호", "최초 수량", "단위", "유통기한", "보관 위치", "등록 날짜", "등록자", "알림 기준 수량", "알림 무시"]
                     processed_data.insert(0, header)
-                    
                     sheet.update(processed_data)
-                    st.success(f"✅ 총 {len(processed_data)-1}건 등록 완료! '재고 대시보드' 탭에서 확인하세요.")
+                    
+                    st.success(f"✅ 총 {len(processed_data)-1}건 등록 완료! 수량 컬럼이 '{col_qty}'로 올바르게 설정되었는지 확인하세요.")
                     st.cache_data.clear()
                     st.rerun()
 
             except Exception as e:
-                st.error(f"처리 중 오류 발생: {e}")
+                st.error(f"오류 발생: {e}")
 
     # --- 2. 개별 직접 등록 섹션 (기존 기능) ---
     st.divider()
@@ -394,6 +393,7 @@ with tab3:
         # 보여줄 컬럼 정리
         view_cols = ["제품명", "제조사", "Cat. No.", "Lot 번호", "현재 재고", "단위", "유통기한", "보관 위치"]
         st.dataframe(view_df[view_cols], use_container_width=True, hide_index=True)
+
 
 
 
