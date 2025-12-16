@@ -242,10 +242,13 @@ with tab3:
         # 보기 좋게 컬럼 정리
         display_cols = ["제품명", "현재고", "단위", "보관 위치", "제조사", "Cat. No.", "알림 기준 수량"]
         st.dataframe(df_stock[display_cols], use_container_width=True, hide_index=True)
-        
+
         # (선택 사항) 입출고 히스토리 보기
         with st.expander("📜 상세 입출고 이력 보기"):
-            st.dataframe(df_log.sort_values(by=df_log.columns[0], ascending=False), use)
-
+            if not df_log.empty:
+                # use 라고 적힌 부분을 use_container_width=True 로 수정했습니다.
+                st.dataframe(df_log.sort_values(by=df_log.columns[0], ascending=False), use_container_width=True)
+            else:
+                st.info("아직 입출고 기록이 없습니다.")
 
 
