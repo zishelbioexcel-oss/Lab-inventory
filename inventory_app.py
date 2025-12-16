@@ -31,7 +31,7 @@ def get_gspread_client():
     except Exception as e:
         return None, f"인증 오류: {e}"
 
-# (2) 데이터 로드 함수
+# (2) 데이터 로드 함수 (수정됨: 빈 시트 방어 로직 추가)
 def load_data(client):
     # Master DB 로드
     sh_db = client.open(REAGENT_DB_NAME)
@@ -44,6 +44,13 @@ def load_data(client):
     ws_log = sh_log.worksheet(USAGE_LOG_TAB)
     data_log = ws_log.get_all_records()
     df_log = pd.DataFrame(data_log)
+    
+    # [수정] Log 시트가 비어있거나 '수량' 컬럼이 없으면 빈 껍데기 생성 (에러 방지)
+    required_cols = ['날짜', '구분', '제품명', 'Lot 번호', '수량', '유효기간', '담당자', '비고']
+    
+    # 데이터프레임이 비어있거나 필수 컬럼이 하나라도 없으면 재정의
+    if df_log.empty or not set(['수량', '제품명']).issubset(df_log.columns):
+        df_log = pd.DataFrame(columns=required_cols)
     
     return df_master, df_log, ws_db, ws_log
 
@@ -239,5 +246,6 @@ with tab3:
         # (선택 사항) 입출고 히스토리 보기
         with st.expander("📜 상세 입출고 이력 보기"):
             st.dataframe(df_log.sort_values(by=df_log.columns[0], ascending=False), use)
+
 
 
