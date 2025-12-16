@@ -101,7 +101,7 @@ if auth_error_msg:
 tab1, tab2, tab3 = st.tabs(["📝 새 품목/엑셀 등록", "📉 시약 사용", "📊 재고 대시보드"])
 
 # ==============================================================================
-# [Tab 1] 새 품목 등록 & 엑셀 업로드 (핵심 수정됨)
+# [Tab 1] 새 품목 등록 & 엑셀 업로드 (수정됨: 매핑 정확도 향상)
 # ==============================================================================
 with tab1:
     st.header("📝 품목 등록 관리")
@@ -113,26 +113,33 @@ with tab1:
         
         if uploaded_file:
             try:
-                # 엑셀 읽기
+                # 1. 엑셀 읽기
                 df_upload = pd.read_excel(uploaded_file)
-                # 1. 모든 컬럼에서 '-' 문자를 0으로 치환 (숫자 컬럼 계산을 위해)
-                df_upload = df_upload.replace('-', 0)
-                # 2. 혹시 몰라 NaN(빈칸)도 0으로 채우기 (선택사항)
-                df_upload = df_upload.fillna(0)
                 
-                st.write("엑셀 데이터 미리보기:", df_upload.head(3))
+                # [중요] 엑셀 헤더의 앞뒤 공백 제거 (실수 방지)
+                df_upload.columns = df_upload.columns.str.strip()
                 
-                # 매핑 가이드 (사용자 엑셀 -> 앱 DB)
-                # 좌측: 앱에서 쓰는 이름 / 우측: 엑셀 파일의 헤더 이름
+                # [중요] 엑셀 데이터 안의 '-' 문자만 0으로 변경 (수량 계산 오류 방지)
+                # 단, 제품명이나 Cat.No. 같은 텍스트 컬럼은 건드리지 않도록 주의해야 함
+                # 여기서는 안전하게 '숫자 변환' 단계에서 처리하도록 이 줄은 생략하거나, 
+                # 수량 컬럼에 대해서만 replace를 수행하는 것이 좋습니다.
+                # 이번에는 fillna만 처리합니다.
+                df_upload = df_upload.fillna("") 
+
+                st.write("엑셀 데이터 미리보기 (상위 3개):", df_upload.head(3))
+                st.write("감지된 엑셀 헤더:", list(df_upload.columns)) # 디버깅용 확인
+                
+                # 2. 매핑 설정 (이미지 기준 정확한 띄어쓰기 적용)
+                # 좌측: 앱 내부 이름 / 우측: 엑셀 헤더 이름
                 COLUMN_MAPPING = {
-                    "제품명": "품목명",       # 엑셀의 '품목명' -> 앱의 '제품명'
+                    "제품명": "품목명",       
                     "제조사": "제조사",
-                    "Cat. No.": "Cat.No.",   # 엑셀의 'Cat.No.'
-                    "최초 수량": "용량",      # 엑셀의 '용량' 수치
+                    "Cat. No.": "Cat. No.",   # [수정] 띄어쓰기 주의!
+                    "최초 수량": "용량",      
                     "단위": "단위",
                     "유통기한": "유효기간",
-                    "보관 위치": "보관 장소",  # 엑셀의 '보관 장소'
-                    "알림 기준 수량": "안전재고" # 엑셀의 '안전재고'
+                    "보관 위치": "보관 장소",  # [수정] 띄어쓰기 주의!
+                    "알림 기준 수량": "안전재고"
                 }
                 
                 col1, col2 = st.columns(2)
@@ -142,41 +149,56 @@ with tab1:
                     sh = client.open(REAGENT_DB_NAME)
                     sheet = sh.worksheet(REAGENT_DB_TAB)
                     
-                    # 1. 데이터 전처리
+                    # 3. 데이터 변환 및 매핑
                     processed_data = []
-                    for index, row in df_upload.iterrows():
-                        # 필수값 매핑 (없으면 기본값)
-                        product_name = str(row.get(COLUMN_MAPPING["제품명"], ""))
-                        if not product_name or product_name == "nan": continue # 품목명 없으면 스킵
-                        
-                        # Lot 번호 처리 (엑셀에 없으면 Initial로 지정)
-                        lot_no = str(row.get("Lot No", "Initial"))
-                        if lot_no == "nan": lot_no = "Initial"
+                    
+                    # 엑셀에 없는 컬럼이 있을 경우 에러 방지
+                    missing_cols = [v for k, v in COLUMN_MAPPING.items() if v not in df_upload.columns]
+                    if missing_cols:
+                        st.error(f"⚠️ 다음 컬럼을 엑셀에서 찾을 수 없습니다: {missing_cols}")
+                        st.stop()
 
-                        # 날짜 변환 (YYYY-MM-DD)
+                    for index, row in df_upload.iterrows():
+                        # A. 필수값 처리
+                        product_name = str(row.get(COLUMN_MAPPING["제품명"], "")).strip()
+                        if not product_name or product_name == "nan" or product_name == "": continue
+                        
+                        # B. 수치 데이터 안전 변환 (문자 '-'가 들어있으면 0으로)
+                        def safe_float(val):
+                            try:
+                                return float(val)
+                            except:
+                                return 0.0
+                        
+                        initial_qty = safe_float(row.get(COLUMN_MAPPING["최초 수량"]))
+                        alert_qty = safe_float(row.get(COLUMN_MAPPING["알림 기준 수량"]))
+
+                        # C. 날짜 변환
                         expiry_raw = row.get(COLUMN_MAPPING["유통기한"], "")
                         expiry_str = ""
-                        if pd.notnull(expiry_raw) and expiry_raw != "":
+                        if str(expiry_raw).strip() != "" and str(expiry_raw) != "nan":
                             try:
                                 expiry_str = pd.to_datetime(expiry_raw).strftime("%Y-%m-%d")
                             except:
-                                expiry_str = str(expiry_raw) # 변환 실패시 텍스트 그대로
+                                expiry_str = str(expiry_raw)
 
+                        # D. 데이터 조립
                         item = {
                             "제품명": product_name,
                             "제조사": str(row.get(COLUMN_MAPPING["제조사"], "-")),
-                            "Cat. No.": str(row.get(COLUMN_MAPPING["Cat. No."], "-")),
-                            "Lot 번호": lot_no,
-                            "최초 수량": float(row.get(COLUMN_MAPPING["최초 수량"], 0)),
+                            "Cat. No.": str(row.get(COLUMN_MAPPING["Cat. No."], "-")), # 매핑된 이름으로 가져옴
+                            "Lot 번호": "Initial", # 엑셀에 Lot 없으면 초기값
+                            "최초 수량": initial_qty,
                             "단위": str(row.get(COLUMN_MAPPING["단위"], "ea")),
                             "유통기한": expiry_str,
                             "보관 위치": str(row.get(COLUMN_MAPPING["보관 위치"], "-")),
                             "등록 날짜": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "등록자": registrant_name,
-                            "알림 기준 수량": float(row.get(COLUMN_MAPPING["알림 기준 수량"], 0)),
+                            "알림 기준 수량": alert_qty,
                             "알림 무시": "아니요"
                         }
-                        # 리스트 순서 보장 (DB 컬럼 순서대로)
+                        
+                        # E. 구글 시트 순서에 맞게 리스트 변환
                         row_list = [
                             item["제품명"], item["제조사"], item["Cat. No."], item["Lot 번호"],
                             item["최초 수량"], item["단위"], item["유통기한"], item["보관 위치"],
@@ -184,19 +206,18 @@ with tab1:
                         ]
                         processed_data.append(row_list)
                     
-                    # 2. 구글 시트 초기화 및 업데이트
+                    # 4. 업로드 실행
                     sheet.clear()
-                    # 헤더 추가
                     header = ["제품명", "제조사", "Cat. No.", "Lot 번호", "최초 수량", "단위", "유통기한", "보관 위치", "등록 날짜", "등록자", "알림 기준 수량", "알림 무시"]
                     processed_data.insert(0, header)
                     
                     sheet.update(processed_data)
-                    st.success(f"✅ 총 {len(processed_data)-1}건의 데이터가 성공적으로 등록되었습니다!")
+                    st.success(f"✅ 총 {len(processed_data)-1}건 등록 완료! '재고 대시보드' 탭에서 확인하세요.")
                     st.cache_data.clear()
                     st.rerun()
 
             except Exception as e:
-                st.error(f"엑셀 처리 중 오류 발생: {e}")
+                st.error(f"처리 중 오류 발생: {e}")
 
     # --- 2. 개별 직접 등록 섹션 (기존 기능) ---
     st.divider()
@@ -373,5 +394,6 @@ with tab3:
         # 보여줄 컬럼 정리
         view_cols = ["제품명", "제조사", "Cat. No.", "Lot 번호", "현재 재고", "단위", "유통기한", "보관 위치"]
         st.dataframe(view_df[view_cols], use_container_width=True, hide_index=True)
+
 
 
