@@ -1,3 +1,5 @@
+Python
+
 import streamlit as st
 import gspread
 import json
@@ -6,394 +8,236 @@ from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
 from datetime import datetime
 
-# --- 1. 앱의 기본 설정 ---
-st.set_page_config(page_title="실험실 재고 관리기 v51", layout="wide")
-st.title("🔬 실험실 재고 관리기 v51 (Excel BOM 연동형)")
-st.write("엑셀 BOM 파일을 업로드하여 초기 재고를 셋팅하고, 사용량을 관리합니다.")
+# --- 1. 앱 설정 ---
+st.set_page_config(page_title="실험실 재고 관리기 v52", layout="wide")
+st.title("🔬 실험실 재고 관리기 v52 (Master/History 분리형)")
+st.caption("BOM은 기준 정보만 관리하고, 재고 수량은 입출고 내역을 통해 자동 계산합니다.")
 
-# --- 2. Google Sheets 인증 및 설정 ---
-REAGENT_DB_NAME = "Reagent_DB"  
-REAGENT_DB_TAB = "Master"       
-USAGE_LOG_NAME = "Usage_Log"    
-USAGE_LOG_TAB = "Log"           
+# --- 2. 구글 시트 연결 설정 ---
+REAGENT_DB_NAME = "Reagent_DB"
+REAGENT_DB_TAB = "Master"       # BOM (기준정보)
+USAGE_LOG_NAME = "Usage_Log"    # 입출고 내역 (변동정보)
+USAGE_LOG_TAB = "Log"
 
-# (1) 인증 클라이언트 생성
-@st.cache_resource(ttl=600)
+# (1) 인증 함수
+@st.cache_resource
 def get_gspread_client():
     try:
-        scope = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive'
-        ]
+        scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
         if 'gcp_json_base64' in st.secrets:
-            base64_string = st.secrets["gcp_json_base64"]
-            json_string = base64.b64decode(base64_string).decode("utf-8")
-            creds_dict = json.loads(json_string) 
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(
+                json.loads(base64.b64decode(st.secrets["gcp_json_base64"]).decode("utf-8")), scope)
         else:
-            # 로컬 실행 시 secrets.toml 경로 확인 필요
             creds = ServiceAccountCredentials.from_service_account_file('.streamlit/secrets.toml', scope)
-        client = gspread.authorize(creds)
-        return client, None
-    except FileNotFoundError:
-        return None, "로컬 Secrets 파일('.streamlit/secrets.toml')을 찾을 수 없습니다."
+        return gspread.authorize(creds), None
     except Exception as e:
-        return None, f"Google 인증 실패: {e}"
+        return None, f"인증 오류: {e}"
 
-# (2) 마스터 DB 로드
-@st.cache_data(ttl=60) 
-def load_reagent_db(_client):
-    try:
-        sh = _client.open(REAGENT_DB_NAME)
-        sheet = sh.worksheet(REAGENT_DB_TAB)
-        data = sheet.get_all_records()
-        
-        # 필수 컬럼 정의
-        required_cols = ["제품명", "제조사", "Cat. No.", "Lot 번호", "최초 수량", "단위", "유통기한", "보관 위치", "등록 날짜", "등록자", "알림 기준 수량", "알림 무시"]
-        
-        if not data:
-            return pd.DataFrame(columns=required_cols)
-        
-        df = pd.DataFrame(data)
-        
-        # 누락된 컬럼이 있다면 빈 값으로 생성
-        for col in required_cols:
-            if col not in df.columns:
-                df[col] = ""
-        
-        # 데이터 타입 정리
-        df['제품명'] = df['제품명'].astype(str)
-        df['최초 수량'] = pd.to_numeric(df['최초 수량'], errors='coerce').fillna(0)
-        df['알림 기준 수량'] = pd.to_numeric(df['알림 기준 수량'], errors='coerce').fillna(0) 
-        df['유통기한'] = pd.to_datetime(df['유통기한'], errors='coerce') 
-        df['등록 날짜'] = pd.to_datetime(df['등록 날짜'], errors='coerce') 
-        
-        return df    
-    except Exception as e:
-        st.error(f"Reagent_DB 로드 실패: {e}")
-        return pd.DataFrame()
+# (2) 데이터 로드 함수
+def load_data(client):
+    # Master DB 로드
+    sh_db = client.open(REAGENT_DB_NAME)
+    ws_db = sh_db.worksheet(REAGENT_DB_TAB)
+    data_db = ws_db.get_all_records()
+    df_master = pd.DataFrame(data_db)
+    
+    # Log 로드
+    sh_log = client.open(USAGE_LOG_NAME)
+    ws_log = sh_log.worksheet(USAGE_LOG_TAB)
+    data_log = ws_log.get_all_records()
+    df_log = pd.DataFrame(data_log)
+    
+    return df_master, df_log, ws_db, ws_log
 
-# (3) 사용 기록(Log) 로드
-@st.cache_data(ttl=60)
-def load_usage_log(_client):
-    try:
-        sh = _client.open(USAGE_LOG_NAME)
-        sheet = sh.worksheet(USAGE_LOG_TAB)
-        data = sheet.get_all_records()
-        if not data:
-            return pd.DataFrame(columns=["제품명", "Lot 번호", "사용량", "Timestamp", "사용자", "비고"]) 
-        
-        df = pd.DataFrame(data)
-        df['사용량'] = pd.to_numeric(df['사용량'], errors='coerce').fillna(0)
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce') 
-        return df
-    except Exception as e:
-        st.error(f"Usage_Log 로드 실패: {e}")
-        return pd.DataFrame()
+# --- 3. 앱 실행 로직 ---
+client, err = get_gspread_client()
+if err: st.error(err); st.stop()
 
-# --- 3. 앱 실행 ---
-client, auth_error_msg = get_gspread_client()
-
-if auth_error_msg:
-    st.error(auth_error_msg)
-    st.stop() 
-
-tab1, tab2, tab3 = st.tabs(["📝 새 품목/엑셀 등록", "📉 시약 사용", "📊 재고 대시보드"])
+# 탭 구성: 이젠 '입고'와 '사용'이 같은 레벨의 액션입니다.
+tab1, tab2, tab3 = st.tabs(["📂 BOM(품목) 관리", "📦 입고/사용 등록", "📊 실시간 재고 현황"])
 
 # ==============================================================================
-# [Tab 1] 새 품목 등록 & 스마트 엑셀 업로드 (유연성 강화 버전)
+# [Tab 1] BOM(품목) 관리 - 기준 정보 업로드
 # ==============================================================================
 with tab1:
-    st.header("📝 품목 등록 관리")
-
-    # --- 1. 스마트 엑셀 업로드 섹션 ---
-    with st.expander("📂 엑셀 BOM 파일로 일괄 업로드 (Smart)", expanded=True):
-        st.info("엑셀 파일을 올리고, 어떤 열이 어떤 정보인지 직접 선택하세요.")
-        uploaded_file = st.file_uploader("엑셀 파일 선택 (.xlsx)", type=['xlsx'])
-        
+    st.header("📂 BOM 마스터 데이터 관리")
+    st.info("여기서는 '재고 수량'을 입력하지 않습니다. 품목의 **정의(이름, 제조사, 위치 등)**만 등록하세요.")
+    
+    with st.expander("엑셀 BOM 업로드 (기준 정보 갱신)", expanded=True):
+        uploaded_file = st.file_uploader("정리된 BOM 엑셀 파일 (.xlsx)", type=['xlsx'])
         if uploaded_file:
-            try:
-                # 엑셀 읽기
-                df_upload = pd.read_excel(uploaded_file)
-                # 헤더 공백 제거
-                df_upload.columns = df_upload.columns.str.strip()
-                
-                st.write("▼ 엑셀 데이터 미리보기")
-                st.dataframe(df_upload.head(3), use_container_width=True)
-                
-                st.divider()
-                st.subheader("🔗 데이터 연결 (Mapping)")
-                st.write("엑셀의 어느 열(Column)을 앱의 데이터로 쓸지 선택하세요.")
-                
-                excel_cols = list(df_upload.columns)
-                
-                # --- 동적 매핑 선택 UI ---
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    col_name = st.selectbox("1. 제품명(필수) 열 선택", excel_cols, index=excel_cols.index("품목명") if "품목명" in excel_cols else 0)
-                    col_mfg = st.selectbox("2. 제조사 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("제조사") + 1 if "제조사" in excel_cols else 0)
-                    col_cat = st.selectbox("3. Cat. No. 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("Cat. No.") + 1 if "Cat. No." in excel_cols else 0)
-                
-                with c2:
-                    # 여기가 핵심! 사용자가 '용량'이 아니라 '현재고'를 선택하게 유도
-                    col_qty = st.selectbox("4. 재고수량(필수) 열 선택", excel_cols, index=excel_cols.index("현재고") if "현재고" in excel_cols else 0, help="실제 창고에 있는 개수가 적힌 열을 선택하세요.")
-                    col_unit = st.selectbox("5. 단위 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("단위") + 1 if "단위" in excel_cols else 0)
-                    col_lot = st.selectbox("6. Lot 번호 열 선택", ["(없음, Initial로 설정)"] + excel_cols)
-                    
-                with c3:
-                    col_loc = st.selectbox("7. 보관위치 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("보관 장소") + 1 if "보관 장소" in excel_cols else 0)
-                    col_exp = st.selectbox("8. 유효기간 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("유효기간") + 1 if "유효기간" in excel_cols else 0)
-                    col_alert = st.selectbox("9. 안전재고 열 선택", ["(없음)"] + excel_cols, index=excel_cols.index("안전재고") + 1 if "안전재고" in excel_cols else 0)
-
-                st.warning("⚠️ 주의: 'Google Sheets에 덮어쓰기'를 누르면 기존 DB가 초기화됩니다.")
-                
-                if st.button("🚀 설정한 대로 업로드하기"):
+            df_upload = pd.read_excel(uploaded_file)
+            df_upload.columns = df_upload.columns.str.strip() # 헤더 공백 제거
+            
+            st.write("미리보기:", df_upload.head(3))
+            
+            # 매핑: 수량/날짜 컬럼이 사라졌으므로 매핑도 단순해집니다.
+            COL_MAP = {
+                "제품명": "품목명", "제조사": "제조사", "Cat. No.": "Cat. No.",
+                "단위": "단위", "보관 위치": "보관 장소", "알림 기준 수량": "안전재고"
+            }
+            
+            if st.button("🚀 기준 정보 덮어쓰기 (DB 초기화)"):
+                try:
                     sh = client.open(REAGENT_DB_NAME)
-                    sheet = sh.worksheet(REAGENT_DB_TAB)
+                    ws = sh.worksheet(REAGENT_DB_TAB)
                     
-                    processed_data = []
-                    registrant_name = "관리자(일괄)"
-
-                    for index, row in df_upload.iterrows():
-                        # 필수값 체크
-                        product_name = str(row[col_name]).strip()
-                        if not product_name or product_name == "nan": continue
-
-                        # 값 추출 함수 (선택 안함인 경우 처리)
-                        def get_val(col_opt, default_val="-"):
-                            if col_opt.startswith("(없음"): return default_val
-                            val = row.get(col_opt, default_val)
-                            return str(val) if pd.notnull(val) else default_val
-
-                        # 수치 변환 함수
-                        def get_num(col_opt):
-                            if col_opt.startswith("(없음"): return 0.0
-                            val = row.get(col_opt, 0)
-                            try:
-                                return float(str(val).replace(",", "").replace("-","0"))
-                            except:
-                                return 0.0
-
-                        # Lot 번호 처리 (없음 선택시 Initial)
-                        lot_val = get_val(col_lot, "Initial")
-                        if lot_val == "nan" or lot_val == "": lot_val = "Initial"
-
-                        item = {
-                            "제품명": product_name,
-                            "제조사": get_val(col_mfg),
-                            "Cat. No.": get_val(col_cat),
-                            "Lot 번호": lot_val,
-                            "최초 수량": get_num(col_qty),  # 여기서 사용자가 선택한 '현재고' 컬럼의 값을 가져옴
-                            "단위": get_val(col_unit, "ea"),
-                            "유통기한": get_val(col_exp, ""), # 날짜 포맷팅은 필요시 추가
-                            "보관 위치": get_val(col_loc),
-                            "등록 날짜": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "등록자": registrant_name,
-                            "알림 기준 수량": get_num(col_alert),
-                            "알림 무시": "아니요"
-                        }
+                    processed = []
+                    header = ["제품명", "제조사", "Cat. No.", "단위", "보관 위치", "알림 기준 수량", "등록일", "등록자"]
+                    processed.append(header)
+                    
+                    for _, row in df_upload.iterrows():
+                        p_name = str(row.get(COL_MAP["제품명"], "")).strip()
+                        if not p_name or p_name == "nan": continue
                         
-                        # 날짜 포맷 정리 (YYYY-MM-DD)
-                        if item["유통기한"] and len(item["유통기한"]) >= 10:
-                             try: item["유통기한"] = pd.to_datetime(item["유통기한"]).strftime("%Y-%m-%d")
-                             except: pass
+                        # 안전재고 숫자 처리
+                        try: safe_stock = float(str(row.get(COL_MAP["알림 기준 수량"], 0)).replace("-","0"))
+                        except: safe_stock = 0.0
 
-                        row_list = [
-                            item["제품명"], item["제조사"], item["Cat. No."], item["Lot 번호"],
-                            item["최초 수량"], item["단위"], item["유통기한"], item["보관 위치"],
-                            item["등록 날짜"], item["등록자"], item["알림 기준 수량"], item["알림 무시"]
-                        ]
-                        processed_data.append(row_list)
-
-                    # 업로드
-                    sheet.clear()
-                    header = ["제품명", "제조사", "Cat. No.", "Lot 번호", "최초 수량", "단위", "유통기한", "보관 위치", "등록 날짜", "등록자", "알림 기준 수량", "알림 무시"]
-                    processed_data.insert(0, header)
-                    sheet.update(processed_data)
+                        processed.append([
+                            p_name,
+                            str(row.get(COL_MAP["제조사"], "-")),
+                            str(row.get(COL_MAP["Cat. No."], "-")),
+                            str(row.get(COL_MAP["단위"], "ea")),
+                            str(row.get(COL_MAP["보관 위치"], "-")),
+                            safe_stock,
+                            datetime.now().strftime("%Y-%m-%d"),
+                            "관리자(일괄)"
+                        ])
                     
-                    st.success(f"✅ 총 {len(processed_data)-1}건 등록 완료! 수량 컬럼이 '{col_qty}'로 올바르게 설정되었는지 확인하세요.")
+                    ws.clear()
+                    ws.update(processed)
+                    st.success(f"✅ 기준 정보 {len(processed)-1}건 등록 완료! 이제 '입고' 탭에서 수량을 채워넣으세요.")
                     st.cache_data.clear()
-                    st.rerun()
-
-            except Exception as e:
-                st.error(f"오류 발생: {e}")
-
-    # --- 2. 개별 직접 등록 섹션 (기존 기능) ---
-    st.divider()
-    with st.expander("➕ 개별 품목 직접 등록 (추가)"):
-        with st.form(key="new_item_form", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                product_name = st.text_input("제품명*")
-                manufacturer = st.text_input("제조사")
-                cat_no = st.text_input("Cat. No.")
-                lot_no = st.text_input("Lot 번호*", value="Initial")
-            with col2:
-                initial_qty = st.number_input("최초 수량*", min_value=0.0, step=1.0)
-                unit = st.selectbox("단위*", ["mL", "L", "g", "kg", "box", "kit", "ea"])
-                alert_qty = st.number_input("알림 기준 수량 (안전재고)", value=5.0)
-            
-            location = st.text_input("보관 위치")
-            expiry_date = st.date_input("유통기한", datetime.now() + pd.DateOffset(years=1))
-            registrant = st.text_input("등록자 이름*")
-            
-            if st.form_submit_button("등록하기"):
-                if not product_name or initial_qty <= 0:
-                    st.error("제품명과 수량은 필수입니다.")
-                else:
-                    sh = client.open(REAGENT_DB_NAME)
-                    sheet = sh.worksheet(REAGENT_DB_TAB)
-                    row_data = [
-                        product_name, manufacturer, cat_no, lot_no, float(initial_qty), unit,
-                        expiry_date.strftime("%Y-%m-%d"), location, 
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), registrant, float(alert_qty), "아니요"
-                    ]
-                    sheet.append_row(row_data)
-                    st.success(f"{product_name} 등록 완료!")
-                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"업로드 실패: {e}")
 
 # ==============================================================================
-# [Tab 2] 시약 사용 기록
+# [Tab 2] 입고 및 사용 등록 (핵심 기능)
 # ==============================================================================
 with tab2:
-    st.header("📉 시약 사용 기록")
-    df_db = load_reagent_db(client)
-    df_log = load_usage_log(client)
-
-    if df_db.empty:
-        st.warning("등록된 품목이 없습니다. Tab 1에서 엑셀 업로드 또는 등록을 먼저 해주세요.")
+    st.header("📦 자재 수불 관리 (Transaction)")
+    
+    df_master, df_log, _, ws_log = load_data(client)
+    
+    if df_master.empty:
+        st.warning("먼저 BOM을 등록해주세요.")
     else:
-        # 제품 선택
-        all_products = sorted(df_db['제품명'].unique())
-        selected_product = st.selectbox("사용할 제품 선택", all_products)
+        products = sorted(df_master['제품명'].unique())
         
-        # Lot 선택
-        if selected_product:
-            lots = df_db[df_db['제품명'] == selected_product]['Lot 번호'].unique()
-            selected_lot = st.selectbox("Lot 번호 선택", lots)
-            
-            # 현재 재고 계산
-            item_info = df_db[(df_db['제품명'] == selected_product) & (df_db['Lot 번호'] == selected_lot)].iloc[0]
-            initial_stock = item_info['최초 수량']
-            
-            used_stock = 0
-            if not df_log.empty:
-                used_stock = df_log[(df_log['제품명'] == selected_product) & (df_log['Lot 번호'] == selected_lot)]['사용량'].sum()
-            
-            current_stock = initial_stock - used_stock
-            unit = item_info['단위']
-            
-            st.info(f"📊 **현재 재고: {current_stock} {unit}** (최초: {initial_stock} - 사용: {used_stock})")
-            
-            # 사용 입력 폼
-            with st.form("usage_form", clear_on_submit=True):
-                use_qty = st.number_input("사용량", min_value=0.0, step=0.1, max_value=float(current_stock))
-                user_name = st.text_input("사용자")
-                note = st.text_input("비고 (실험명 등)")
-                
-                if st.form_submit_button("사용 기록 저장"):
-                    if use_qty > 0 and user_name:
-                        sh_log = client.open(USAGE_LOG_NAME)
-                        sheet_log = sh_log.worksheet(USAGE_LOG_TAB)
-                        sheet_log.append_row([
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            selected_product, selected_lot, use_qty, user_name, note
-                        ])
-                        st.success("저장되었습니다.")
-                        st.cache_data.clear()
-                        st.rerun()
-                    else:
-                        st.error("사용량과 사용자 이름을 확인하세요.")
-
-# ==============================================================================
-# [Tab 3] 재고 대시보드 (자동 알림)
-# ==============================================================================
-with tab3:
-    st.header("📊 재고 현황 대시보드")
-    
-    if st.button("🔄 데이터 새로고침"):
-        st.cache_data.clear()
-        st.rerun()
-
-    df_db = load_reagent_db(client)
-    df_log = load_usage_log(client)
-    
-    if not df_db.empty:
-        # ------------------------------------------------------------------
-        # [긴급 수정] 병합(Merge) 에러 방지를 위한 데이터 타입 강제 통일
-        # ------------------------------------------------------------------
-        # 1. Master DB의 키 컬럼을 문자열(String)로 변환
-        df_db['제품명'] = df_db['제품명'].astype(str)
-        df_db['Lot 번호'] = df_db['Lot 번호'].astype(str)
-
-        # 2. Usage Log의 키 컬럼도 문자열(String)로 변환 (데이터가 있을 경우만)
-        if not df_log.empty:
-            df_log['제품명'] = df_log['제품명'].astype(str)
-            df_log['Lot 번호'] = df_log['Lot 번호'].astype(str)
-            
-            # 그룹화 및 병합 진행
-            usage_grp = df_log.groupby(['제품명', 'Lot 번호'])['사용량'].sum().reset_index()
-            
-            # 이제 타입이 같으므로 에러가 나지 않습니다.
-            df_final = pd.merge(df_db, usage_grp, on=['제품명', 'Lot 번호'], how='left')
-            df_final['사용량'] = df_final['사용량'].fillna(0)
-        else:
-            df_final = df_db.copy()
-            df_final['사용량'] = 0
-            
-        # ------------------------------------------------------------------
+        # 1. 작업 유형 선택
+        col1, col2 = st.columns([1, 2])
+        action_type = col1.radio("작업 유형 선택", ["🔵 입고 (구매/채워넣기)", "🔴 사용 (소진/출고)"])
         
-        df_final['현재 재고'] = df_final['최초 수량'] - df_final['사용량']
+        # 2. 품목 선택
+        selected_product = col2.selectbox("품목 선택", products)
         
-        # --- 🚨 자동 알림 로직 ---
-        st.subheader("🚨 알림 센터")
-        col1, col2 = st.columns(2)
+        # 품목 상세 정보 가져오기
+        item_info = df_master[df_master['제품명'] == selected_product].iloc[0]
+        unit = item_info['단위']
         
-        # 1. 재고 부족 알림
-        low_stock = df_final[df_final['현재 재고'] <= df_final['알림 기준 수량']]
-        if not low_stock.empty:
-            col1.error(f"⚠️ **재고 부족 ({len(low_stock)}건)**")
-            col1.dataframe(low_stock[['제품명', '현재 재고', '알림 기준 수량', '보관 위치']], hide_index=True)
-        else:
-            col1.success("재고 수량 양호 ✅")
-
-        # 2. 유효기간 임박 알림 (30일)
-        today = pd.to_datetime(datetime.now().date())
-        df_final['유통기한'] = pd.to_datetime(df_final['유통기한'])
-        
-        expiring = df_final[
-            (df_final['유통기한'] <= today + pd.DateOffset(days=30)) & 
-            (df_final['현재 재고'] > 0)
-        ]
-        
-        if not expiring.empty:
-            col2.warning(f"⏳ **유효기간 임박/만료 ({len(expiring)}건)**")
-            col2.dataframe(expiring[['제품명', '유통기한', '현재 재고', '보관 위치']], hide_index=True)
-        else:
-            col2.success("유효기간 양호 ✅")
-
         st.divider()
         
-        # --- 전체 재고 테이블 (필터링) ---
-        st.subheader("📦 전체 재고 목록")
-        
-        # 필터
-        f_col1, f_col2 = st.columns(2)
-        manufacturers = ["전체"] + list(df_final['제조사'].unique())
-        selected_mfg = f_col1.selectbox("제조사 필터", manufacturers)
-        
-        search_txt = f_col2.text_input("🔍 품목명 검색")
-        
-        view_df = df_final.copy()
-        if selected_mfg != "전체":
-            view_df = view_df[view_df['제조사'] == selected_mfg]
-        if search_txt:
-            view_df = view_df[view_df['제품명'].str.contains(search_txt, case=False)]
+        # 3. 입력 폼 (입고냐 사용이냐에 따라 다르게 보임)
+        with st.form("action_form", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
             
-        # 보여줄 컬럼 정리
-        view_cols = ["제품명", "제조사", "Cat. No.", "Lot 번호", "현재 재고", "단위", "유통기한", "보관 위치"]
-        st.dataframe(view_df[view_cols], use_container_width=True, hide_index=True)
+            qty = c1.number_input(f"수량 ({unit})", min_value=0.1, step=1.0)
+            user = c2.text_input("담당자", value="관리자")
+            
+            # 입고일 때는 Lot와 유효기간이 필수 / 사용일 때는 Lot 선택
+            lot_input = "Initial"
+            expiry_input = "-"
+            
+            if "입고" in action_type:
+                lot_input = c3.text_input("Lot 번호 (새로 입력)", value=datetime.now().strftime("%Y%m%d"))
+                expiry_input = st.date_input("유효기간 설정", datetime.now()).strftime("%Y-%m-%d")
+                note_label = "비고 (구매처 등)"
+            else:
+                # 사용 시에는 기존 Lot 중에서 선택 (구현 간소화를 위해 텍스트 입력 혹은 추후 고도화)
+                # 현재는 단순화를 위해 Lot 직접 입력 혹은 'Any'
+                lot_input = c3.text_input("Lot 번호 (사용할 제품)", value="Initial")
+                note_label = "비고 (실험명 등)"
+            
+            note = st.text_input(note_label)
+            
+            # 저장 버튼
+            if st.form_submit_button(f"{action_type} 저장하기"):
+                # 사용(출고)일 경우 수량을 음수로 저장
+                final_qty = qty if "입고" in action_type else -qty
+                action_code = "IN" if "입고" in action_type else "OUT"
+                
+                # 로그 저장 순서: [날짜, 구분, 제품명, Lot, 수량, 유효기간, 담당자, 비고]
+                row_data = [
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    action_code,
+                    selected_product,
+                    lot_input,
+                    final_qty,  # 핵심: 입고는 +, 사용은 -
+                    expiry_input,
+                    user,
+                    note
+                ]
+                
+                ws_log.append_row(row_data)
+                st.success(f"✅ {selected_product} {qty}{unit} {action_type} 처리되었습니다.")
+                st.cache_data.clear() # 데이터 갱신
 
-
-
-
+# ==============================================================================
+# [Tab 3] 실시간 재고 현황 (Dashboard)
+# ==============================================================================
+with tab3:
+    st.header("📊 실시간 재고 현황")
+    if st.button("🔄 새로고침"): st.rerun()
+    
+    df_master, df_log, _, _ = load_data(client)
+    
+    if df_master.empty:
+        st.info("데이터가 없습니다.")
+    else:
+        # --- 재고 계산 로직 (핵심) ---
+        # 1. 로그 데이터가 없으면 재고는 0
+        if df_log.empty:
+            df_stock = df_master.copy()
+            df_stock['현재고'] = 0.0
+        else:
+            # 2. 제품별 수량 합계 계산 (입고는 +, 출고는 - 이므로 그냥 sum하면 됨)
+            # 수치형 변환
+            df_log['수량'] = pd.to_numeric(df_log['수량'], errors='coerce').fillna(0)
+            
+            # 제품별 GroupBy
+            stock_grp = df_log.groupby('제품명')['수량'].sum().reset_index()
+            stock_grp.rename(columns={'수량': '현재고'}, inplace=True)
+            
+            # 3. Master와 결합 (Left Join)
+            df_stock = pd.merge(df_master, stock_grp, on='제품명', how='left')
+            df_stock['현재고'] = df_stock['현재고'].fillna(0) # 거래 없는 품목은 0 처리
+            
+        # --- 화면 표시 ---
+        # 알림 로직
+        df_stock['알림 기준 수량'] = pd.to_numeric(df_stock['알림 기준 수량'], errors='coerce').fillna(0)
+        low_stock = df_stock[df_stock['현재고'] <= df_stock['알림 기준 수량']]
+        
+        c1, c2 = st.columns(2)
+        c1.metric("총 등록 품목 수", f"{len(df_stock)}개")
+        c2.metric("재고 부족 품목", f"{len(low_stock)}개", delta_color="inverse")
+        
+        if not low_stock.empty:
+            st.error("🚨 재고 부족 알림")
+            st.dataframe(low_stock[['제품명', '현재고', '알림 기준 수량', '보관 위치']], hide_index=True)
+        
+        st.divider()
+        st.subheader("📦 전체 재고 리스트")
+        
+        # 검색 기능
+        search = st.text_input("🔍 품목 검색")
+        if search:
+            df_stock = df_stock[df_stock['제품명'].str.contains(search, case=False)]
+            
+        # 보기 좋게 컬럼 정리
+        display_cols = ["제품명", "현재고", "단위", "보관 위치", "제조사", "Cat. No.", "알림 기준 수량"]
+        st.dataframe(df_stock[display_cols], use_container_width=True, hide_index=True)
+        
+        # (선택 사항) 입출고 히스토리 보기
+        with st.expander("📜 상세 입출고 이력 보기"):
+            st.dataframe(df_log.sort_values(by=df_log.columns[0], ascending=False), use
