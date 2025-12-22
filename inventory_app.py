@@ -7,8 +7,8 @@ import pandas as pd
 from datetime import datetime
 
 # --- 1. 앱 설정 ---
-st.set_page_config(page_title="실험실 재고 관리기 v53", layout="wide")
-st.title("🔬 실험실 재고 관리기 v53 (신규 품목 즉시 등록)")
+st.set_page_config(page_title="실험실 재고 관리기 v54", layout="wide")
+st.title("🔬 실험실 재고 관리기 v54")
 
 # --- 2. 구글 시트 연결 설정 ---
 REAGENT_DB_NAME = "Reagent_DB"
@@ -34,14 +34,12 @@ def load_data(client):
     sh_db = client.open(REAGENT_DB_NAME)
     ws_db = sh_db.worksheet(REAGENT_DB_TAB)
     data_db = ws_db.get_all_records()
-    # 확장된 컬럼 구조 반영
     expected_cols = ["제품명", "상세 특징", "Cat. No.", "규격(용량)", "단위", "제조사", "포장단위", "보관 위치", "알림 기준 수량", "등록일", "등록자"]
     
     if not data_db:
         df_master = pd.DataFrame(columns=expected_cols)
     else:
         df_master = pd.DataFrame(data_db)
-        # 없는 컬럼은 빈 값으로 채움
         for col in expected_cols:
             if col not in df_master.columns:
                 df_master[col] = ""
@@ -72,7 +70,6 @@ with tab1:
             df_upload.columns = df_upload.columns.str.strip()
             df_upload = df_upload.fillna("")
             
-            # 매핑 업데이트 (사용자 요청 컬럼 추가)
             COL_MAP = {
                 "제품명": "품목명", "상세 특징": "상세 특징", "Cat. No.": "Cat. No.",
                 "규격(용량)": "용량", "단위": "단위", "제조사": "제조사", 
@@ -84,7 +81,6 @@ with tab1:
                     sh = client.open(REAGENT_DB_NAME)
                     ws = sh.worksheet(REAGENT_DB_TAB)
                     processed = []
-                    # 확장된 헤더
                     header = ["제품명", "상세 특징", "Cat. No.", "규격(용량)", "단위", "제조사", "포장단위", "보관 위치", "알림 기준 수량", "등록일", "등록자"]
                     processed.append(header)
                     
@@ -117,7 +113,7 @@ with tab1:
                     st.error(f"업로드 실패: {e}")
 
 # ==============================================================================
-# [Tab 2] 입고 및 사용 등록 (수정됨: 신규 품목 등록 기능 추가)
+# [Tab 2] 입고 및 사용 등록 (수정됨: 체크박스 위치 변경)
 # ==============================================================================
 with tab2:
     st.header("📦 자재 수불 관리")
@@ -125,8 +121,13 @@ with tab2:
     df_master, df_log, ws_db, ws_log = load_data(client)
     
     # 1. 작업 유형 선택
-    col_type, col_dummy = st.columns([1, 2])
+    col_type, col_check = st.columns([1, 2])
     action_type = col_type.radio("작업 유형", ["🔵 입고 (구매/채워넣기)", "🔴 사용 (소진/출고)"])
+    
+    # [핵심 수정] 폼 밖으로 체크박스를 꺼냈습니다. 이제 즉시 반응합니다!
+    is_new_product = False
+    if "입고" in action_type:
+        is_new_product = col_check.checkbox("🆕 신규 품목 등록 (목록에 없으면 체크하세요)")
     
     st.divider()
 
@@ -135,11 +136,10 @@ with tab2:
         
         # [CASE A] 입고 작업일 때
         if "입고" in action_type:
-            # 신규 등록 여부 체크박스
-            is_new_product = st.checkbox("🆕 신규 품목 등록 (목록에 없는 경우 체크)")
             
             if is_new_product:
-                st.info("📝 새로운 품목 정보를 입력합니다. (마스터 DB에도 자동 저장됩니다)")
+                # 여기가 신규 등록 화면
+                st.markdown("##### 📝 신규 품목 정보 입력")
                 c1, c2, c3 = st.columns(3)
                 new_p_name = c1.text_input("제품명 (필수)*")
                 new_cat_no = c2.text_input("Cat. No.")
@@ -154,9 +154,8 @@ with tab2:
                 new_pkg = c7.text_input("포장단위 (예: 10ea/box)")
                 new_alert = c8.number_input("안전재고(알림 기준)", value=5, step=1)
                 
-                # 입고 정보
                 st.markdown("---")
-                st.write("🔽 **입고 정보 입력**")
+                st.markdown("##### 🔽 입고 수량 입력")
                 lc1, lc2, lc3 = st.columns(3)
                 qty = lc1.number_input("입고 수량 (정수)", min_value=1, step=1, format="%d")
                 lot_input = lc2.text_input("Lot 번호", value=datetime.now().strftime("%Y%m%d"))
@@ -164,16 +163,16 @@ with tab2:
                 
                 selected_product = new_p_name # 로직 연결용
                 
-            else: # 기존 품목 입고
+            else: # 기존 품목 입고 화면
                 if df_master.empty:
-                    st.warning("등록된 품목이 없습니다. 신규 등록을 체크하세요.")
+                    st.warning("등록된 품목이 없습니다. 위 체크박스를 눌러 신규 등록하세요.")
                     st.stop()
                     
                 selected_product = st.selectbox("품목 선택", sorted(df_master['제품명'].unique()))
                 # 품목 정보 표시
                 if selected_product:
                     info = df_master[df_master['제품명'] == selected_product].iloc[0]
-                    st.caption(f"ℹ️ Spec: {info['상세 특징']} | Cat: {info['Cat. No.']} | 제조사: {info['제조사']}")
+                    st.info(f"ℹ️ 선택됨: **{selected_product}** (Spec: {info['상세 특징']} | Cat: {info['Cat. No.']})")
                 
                 lc1, lc2, lc3 = st.columns(3)
                 qty = lc1.number_input("입고 수량 (정수)", min_value=1, step=1, format="%d")
@@ -182,7 +181,6 @@ with tab2:
 
         # [CASE B] 사용(출고) 작업일 때
         else:
-            is_new_product = False # 사용 시에는 신규 등록 불가
             if df_master.empty:
                 st.warning("등록된 품목이 없습니다.")
                 st.stop()
@@ -200,7 +198,7 @@ with tab2:
             lc1, lc2 = st.columns(2)
             qty = lc1.number_input("사용 수량 (정수)", min_value=1, step=1, format="%d")
             lot_input = lc2.selectbox("Lot 번호 (사용 제품)", existing_lots)
-            expiry_input = "-" # 사용 시 유효기간 입력 안함
+            expiry_input = "-" 
 
         # 공통 입력 (담당자, 비고)
         uc1, uc2 = st.columns(2)
@@ -210,17 +208,17 @@ with tab2:
         # --- 저장 버튼 ---
         if st.form_submit_button("저장하기"):
             if not selected_product:
-                st.error("제품명을 입력/선택해주세요.")
+                st.error("제품명을 입력해주세요.")
             else:
                 # 1. 신규 품목이면 마스터 DB에 먼저 등록
-                if is_new_product:
+                if "입고" in action_type and is_new_product:
                     new_row = [
                         new_p_name, new_spec, new_cat_no, new_cap, new_unit, 
                         new_maker, new_pkg, "-", new_alert, 
                         datetime.now().strftime("%Y-%m-%d"), user
                     ]
                     ws_db.append_row(new_row)
-                    st.toast(f"✨ 신규 품목 '{new_p_name}' 마스터 DB 등록 완료!")
+                    st.toast(f"✨ 신규 품목 '{new_p_name}' 등록 완료!")
 
                 # 2. 로그 저장
                 final_qty = qty if "입고" in action_type else -qty
@@ -256,7 +254,6 @@ with tab3:
             df_stock = pd.merge(df_master, stock_grp, on='제품명', how='left')
             df_stock['현재고'] = df_stock['현재고'].fillna(0).astype(int)
 
-        # 알림 로직
         try: df_stock['알림 기준 수량'] = pd.to_numeric(df_stock['알림 기준 수량'], errors='coerce').fillna(0)
         except: pass
         
@@ -267,8 +264,6 @@ with tab3:
             st.dataframe(low_stock[['제품명', '현재고', '알림 기준 수량', '보관 위치']], hide_index=True)
         
         st.subheader("📦 전체 재고 리스트")
-        # 컬럼 순서 정리 (확장된 정보 포함)
         disp_cols = ["제품명", "현재고", "단위", "규격(용량)", "제조사", "Cat. No.", "상세 특징", "보관 위치"]
-        # 실제 DF에 없는 컬럼은 제외하고 표시
         valid_cols = [c for c in disp_cols if c in df_stock.columns]
         st.dataframe(df_stock[valid_cols], use_container_width=True, hide_index=True)
