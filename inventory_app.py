@@ -9,8 +9,8 @@ import re
 import time
 
 # --- 1. 앱 설정 ---
-st.set_page_config(page_title="실험실 재고 관리기 v65", layout="wide")
-st.title("🔬 실험실 재고 관리기 v65 (Expiry Alert)")
+st.set_page_config(page_title="실험실 재고 관리기 v66", layout="wide")
+st.title("🔬 실험실 재고 관리기 v66 (Auto Merge)")
 
 # --- 2. 구글 시트 연결 설정 ---
 REAGENT_DB_NAME = "Reagent_DB"
@@ -58,10 +58,8 @@ def load_data_only(_client):
             df_log = pd.DataFrame(columns=log_cols)
         else:
             df_log = pd.DataFrame(data_log)
-            # '날짜' 컬럼이 남아있다면 '유효기간'으로 이름 변경 (호환성)
             if "날짜" in df_log.columns and "유효기간" not in df_log.columns:
                 df_log.rename(columns={"날짜": "유효기간"}, inplace=True)
-            
             for col in log_cols:
                 if col not in df_log.columns:
                     df_log[col] = ""
@@ -107,6 +105,23 @@ def generate_internal_lot(abbr, df_log):
         else:
             seq = 1
     return f"{prefix}-{seq:02d}"
+
+# [핵심 기능] 동일한 제조사 Lot가 있는지 확인하여 기존 관리번호 반환
+def find_existing_lot_by_mfg(df_log, product_name, mfg_lot):
+    if df_log.empty or not mfg_lot:
+        return None
+    
+    # 제품명과 제조사Lot가 모두 일치하는 기록 찾기 (IN 내역 중에서)
+    mask = (df_log['제품명'] == product_name) & \
+           (df_log['제조사 Lot'].astype(str) == str(mfg_lot)) & \
+           (df_log['구분'] == 'IN')
+    
+    matches = df_log[mask]
+    
+    if not matches.empty:
+        # 가장 최근에 사용된 해당 관리번호를 반환
+        return matches.iloc[-1]['관리번호']
+    return None
 
 def update_master_abbr(client, product_name, new_abbr):
     try:
@@ -204,7 +219,7 @@ with tab2:
                 
                 c1, c2, c3 = st.columns(3)
                 new_p_name = c1.text_input("제품명 (필수)*")
-                new_abbr_input = c2.text_input("식별코드 (3글자)", max_chars=3)
+                new_abbr_input = c2.text_input("식별코드 (3글자, 예: DME)", max_chars=3)
                 new_cat_no = c3.text_input("Cat. No.")
                 
                 c4, c5, c6 = st.columns(3)
@@ -240,7 +255,7 @@ with tab2:
                     
                     st.info(f"ℹ️ Spec: {info['상세 특징']} | Code: **{current_abbr_master}**")
                     auto_lot = generate_internal_lot(current_abbr_master, df_log)
-                    st.success(f"🎫 생성된 관리번호: **{auto_lot}**")
+                    # st.success는 아래에서 체크 후 띄움
                     lot_to_save = auto_lot
                 
                 st.markdown("---")
@@ -248,6 +263,14 @@ with tab2:
                 qty = lc1.number_input("입고 수량", min_value=1, step=1, format="%d")
                 mfg_lot = lc2.text_input("제조사 Lot 번호 (필수)", help="시약병에 적힌 번호")
                 expiry_input = lc3.date_input("유효기간").strftime("%Y-%m-%d")
+                
+                # [실시간 미리보기] 기존 Lot가 있는지 확인
+                if selected_product and mfg_lot:
+                    existing_lot = find_existing_lot_by_mfg(df_log, selected_product, mfg_lot)
+                    if existing_lot:
+                        st.warning(f"🔄 **기존 Lot 발견!** ({existing_lot}) → 새로운 번호를 따지 않고 이 번호로 수량을 합칩니다.")
+                    else:
+                        st.success(f"🆕 **신규 Lot 생성 예정**: {lot_to_save}")
 
         else: # 사용
             if df_master.empty: st.stop()
@@ -287,13 +310,13 @@ with tab2:
             if not selected_product:
                 st.error("제품명을 입력해주세요.")
             else:
+                # 1. 신규 품목 등록 로직
                 if "입고" in action_type and is_new_product:
                     if new_p_name in df_master['제품명'].values:
-                        st.warning(f"⚠️ '{new_p_name}'은(는) 이미 존재합니다. 기존 식별코드를 사용합니다.")
+                        st.warning(f"⚠️ '{new_p_name}' 이미 존재. 기존 정보로 입고 진행.")
                         existing_info = df_master[df_master['제품명'] == new_p_name].iloc[0]
                         final_abbr = str(existing_info.get('식별코드', ''))
                         if not final_abbr: final_abbr = make_smart_abbr(new_p_name)
-                        lot_to_save = generate_internal_lot(final_abbr, df_log)
                     else:
                         final_abbr = new_abbr_input.upper() if new_abbr_input else make_smart_abbr(new_p_name)
                         new_row = [
@@ -302,8 +325,22 @@ with tab2:
                             datetime.now().strftime("%Y-%m-%d"), user
                         ]
                         ws_db.append_row(new_row)
-                        st.toast(f"✨ 신규 품목 '{new_p_name}' 등록 완료!")
-                        lot_to_save = generate_internal_lot(final_abbr, df_log)
+                        st.toast(f"✨ 신규 품목 등록 완료!")
+                    
+                    # 신규 등록 후 Lot 결정 (여기서도 제조사 Lot 같으면 합칠지? 보통 신규 등록은 처음이니 새 Lot)
+                    # 하지만 혹시 모르니 체크
+                    existing_lot = find_existing_lot_by_mfg(df_log, new_p_name, mfg_lot)
+                    lot_to_save = existing_lot if existing_lot else generate_internal_lot(final_abbr, df_log)
+
+                # 2. 기존 품목 입고 시 Lot 결정 (Smart Merge)
+                elif "입고" in action_type:
+                    existing_lot = find_existing_lot_by_mfg(df_log, selected_product, mfg_lot)
+                    if existing_lot:
+                        lot_to_save = existing_lot
+                        st.toast(f"♻️ 기존 관리번호({existing_lot})로 통합되었습니다.")
+                    else:
+                        # lot_to_save는 위에서 이미 계산됨 (auto_lot)
+                        pass
 
                 final_qty = qty if "입고" in action_type else -qty
                 action_code = "IN" if "입고" in action_type else "OUT"
@@ -342,19 +379,15 @@ with tab3:
             df_stock = pd.merge(df_master, stock_grp, on='제품명', how='left')
             df_stock['현재고'] = df_stock['현재고'].fillna(0).astype(int)
 
-            # [B] 유효기간 정보 매핑 (입고 기록에서 가져오기)
-            # 제품명+관리번호를 키로 하여 최신 유효기간을 찾습니다.
+            # [B] 유효기간 정보 매핑
             df_in = df_log[df_log['구분'] == 'IN'].copy()
-            # 유효기간이 있는 데이터만 필터링
             df_in = df_in[df_in['유효기간'].astype(str).str.len() > 5] 
-            # 중복 제거 (같은 Lot면 유효기간 같다고 가정, 최신값 사용)
             expiry_map = df_in.drop_duplicates(subset=['제품명', '관리번호'], keep='last')[['제품명', '관리번호', '유효기간']]
 
             # [C] 상세 Lot별 재고 계산 + 유효기간 병합
             df_log['관리번호'] = df_log['관리번호'].replace("", "Old-Data")
             lot_stock = df_log.groupby(['제품명', '관리번호', '제조사 Lot'])['수량'].sum().reset_index()
             
-            # 재고가 있는 것만 + 유효기간 정보 합치기
             df_active_lots = pd.merge(lot_stock, expiry_map, on=['제품명', '관리번호'], how='left')
             df_active_lots = df_active_lots[df_active_lots['수량'] > 0].sort_values('제품명')
             df_active_lots['유효기간'] = df_active_lots['유효기간'].fillna("-")
@@ -363,10 +396,8 @@ with tab3:
         try: df_stock['알림 기준 수량'] = pd.to_numeric(df_stock['알림 기준 수량'], errors='coerce').fillna(0)
         except: pass
         
-        # [알림 1] 재고 부족
         low_stock = df_stock[df_stock['현재고'] <= df_stock['알림 기준 수량']]
         
-        # [알림 2] 유효기간 만료/임박 체크
         expired_items = []
         near_expiry_items = []
         today = datetime.now().date()
@@ -374,9 +405,8 @@ with tab3:
         if not df_active_lots.empty:
             for _, row in df_active_lots.iterrows():
                 try:
-                    # 유효기간 문자열을 날짜로 변환
                     exp_date_str = str(row['유효기간'])
-                    if len(exp_date_str) >= 10: # YYYY-MM-DD 형식 체크
+                    if len(exp_date_str) >= 10: 
                         exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
                         delta = (exp_date - today).days
                         
@@ -392,14 +422,13 @@ with tab3:
                         elif delta <= 30:
                             near_expiry_items.append(item_info)
                 except:
-                    continue # 날짜 형식이 아니면 패스
+                    continue
 
-        # 화면 출력
         col_alert1, col_alert2 = st.columns(2)
         
         with col_alert1:
             if not low_stock.empty:
-                st.error(f"🚨 재고 부족 ({len(low_stock)}건)")
+                st.error(f"🚨 재고 부족 ({len(low_stock)}건) - 발주 필요")
                 st.dataframe(low_stock[['제품명', '현재고', '알림 기준 수량', '보관 위치']], hide_index=True)
             
             if expired_items:
@@ -414,7 +443,6 @@ with tab3:
         st.divider()
         st.subheader("📦 품목별 상세 재고 (Lot & 유효기간)")
         if not df_active_lots.empty:
-            # 컬럼 순서 정리
             disp_cols = ['제품명', '관리번호', '제조사 Lot', '수량', '유효기간']
             st.dataframe(df_active_lots[disp_cols], use_container_width=True)
         else:
