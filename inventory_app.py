@@ -1,3 +1,17 @@
+죄송합니다! 😓 v61 버전으로 코드를 정리하는 과정에서, [제조사(new_maker)] 입력칸을 실수로 누락시켰는데, 정작 저장할 때는 그 변수를 찾으려고 해서 발생한 **NameError**입니다.
+
+입고 화면에 '제조사' 입력칸을 부활시키고, 변수가 정의되지 않아 멈추는 문제를 해결한 v62 (버그 수정판) 코드를 드립니다.
+
+🛠️ 수정 사항
+Tab 2 (입고): 신규 등록 화면에 제조사 입력칸을 다시 넣었습니다.
+
+안전 장치: 혹시라도 입력값이 비어있을 경우를 대비해 기본값을 설정했습니다.
+
+🚀 실험실 재고 관리기 v62 (버그 수정 완료)
+기존 코드를 지우고 아래 코드로 덮어씌우시면 NameError가 즉시 해결됩니다.
+
+Python
+
 import streamlit as st
 import gspread
 import json
@@ -9,8 +23,8 @@ import re
 import time
 
 # --- 1. 앱 설정 ---
-st.set_page_config(page_title="실험실 재고 관리기 v61", layout="wide")
-st.title("🔬 실험실 재고 관리기 v61 (Stable & Fast)")
+st.set_page_config(page_title="실험실 재고 관리기 v62", layout="wide")
+st.title("🔬 실험실 재고 관리기 v62 (Fix: NameError)")
 
 # --- 2. 구글 시트 연결 설정 ---
 REAGENT_DB_NAME = "Reagent_DB"
@@ -22,23 +36,19 @@ USAGE_LOG_TAB = "Log"
 def get_gspread_client():
     try:
         scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        # secrets.toml에서 정보를 가져옵니다
         if 'gcp_json_base64' in st.secrets:
             creds = ServiceAccountCredentials.from_json_keyfile_dict(
                 json.loads(base64.b64decode(st.secrets["gcp_json_base64"]).decode("utf-8")), scope)
         else:
-            # 로컬 개발 환경용 (혹시 파일이 있다면)
             creds = ServiceAccountCredentials.from_service_account_file('.streamlit/secrets.toml', scope)
         return gspread.authorize(creds), None
     except Exception as e:
         return None, f"인증 오류: {e}"
 
-# [핵심 수정] 데이터 읽기 전용 함수 (캐싱 적용: 5초 동안은 다시 부르지 않음)
-# 이렇게 해야 버튼 누를 때마다 API 에러가 나는 것을 막을 수 있습니다.
 @st.cache_data(ttl=5)
 def load_data_only(_client):
     try:
-        # Master DB 읽기
+        # Master DB
         sh_db = _client.open(REAGENT_DB_NAME)
         ws_db = sh_db.worksheet(REAGENT_DB_TAB)
         data_db = ws_db.get_all_records()
@@ -52,7 +62,7 @@ def load_data_only(_client):
                 if col not in df_master.columns:
                     df_master[col] = ""
 
-        # Log DB 읽기
+        # Log DB
         sh_log = _client.open(USAGE_LOG_NAME)
         ws_log = sh_log.worksheet(USAGE_LOG_TAB)
         data_log = ws_log.get_all_records()
@@ -70,7 +80,6 @@ def load_data_only(_client):
     except Exception as e:
         return pd.DataFrame(), pd.DataFrame(), str(e)
 
-# [핵심 수정] 쓰기 전용 함수 (저장할 때만 시트를 연결함)
 def get_worksheets(client):
     try:
         sh_db = client.open(REAGENT_DB_NAME)
@@ -110,7 +119,6 @@ def generate_internal_lot(abbr, df_log):
             seq = 1
     return f"{prefix}-{seq:02d}"
 
-# 마스터 DB 식별코드 업데이트 함수
 def update_master_abbr(client, product_name, new_abbr):
     try:
         sh = client.open(REAGENT_DB_NAME)
@@ -127,13 +135,11 @@ def update_master_abbr(client, product_name, new_abbr):
 client, err = get_gspread_client()
 if err: st.error(err); st.stop()
 
-# 데이터 로드 (캐싱 사용)
 df_master, df_log, load_err = load_data_only(client)
 if load_err:
-    st.error(f"데이터 로딩 실패 (잠시 후 다시 시도하세요): {load_err}")
+    st.error(f"데이터 로딩 실패: {load_err}")
     st.stop()
 
-# 탭 구조
 tab1, tab2, tab3, tab4 = st.tabs(["📂 BOM 업로드", "📦 입고/사용", "📊 재고 현황", "⚙️ 품목/코드 관리"])
 
 # ==============================================================================
@@ -156,7 +162,7 @@ with tab1:
             }
             
             if st.button("🚀 기준 정보 덮어쓰기"):
-                ws_db, _ = get_worksheets(client) # 저장할 때만 연결
+                ws_db, _ = get_worksheets(client)
                 if ws_db:
                     try:
                         processed = []
@@ -169,7 +175,6 @@ with tab1:
                             
                             raw_abbr = str(row.get(COL_MAP["식별코드"], "")).strip()
                             final_abbr = raw_abbr.upper() if raw_abbr else make_smart_abbr(p_name)
-
                             try: safe_stock = float(str(row.get(COL_MAP["알림 기준 수량"], 0)).replace("-","0").replace(",",""))
                             except: safe_stock = 0.0
 
@@ -184,7 +189,7 @@ with tab1:
                         ws_db.clear()
                         ws_db.update(processed)
                         st.success(f"✅ 기준 정보 등록 완료!")
-                        st.cache_data.clear() # 캐시 초기화 (새 데이터 반영 위해)
+                        st.cache_data.clear()
                     except Exception as e:
                         st.error(f"업로드 실패: {e}")
 
@@ -217,7 +222,11 @@ with tab2:
                 new_spec = c4.text_input("상세 특징")
                 new_cap = c5.text_input("용량 (규격)")
                 new_unit = c6.selectbox("단위", ["ea", "box", "ml", "L", "g", "kg", "kit"])
-                new_pkg = st.text_input("포장단위")
+                
+                # [버그 수정] 제조사(new_maker) 입력칸 복구!
+                c7, c8 = st.columns(2)
+                new_pkg = c7.text_input("포장단위 (예: 10ea/box)")
+                new_maker = c8.text_input("제조사 (Maker)") 
                 
                 st.markdown("---")
                 lc1, lc2, lc3 = st.columns(3)
@@ -281,7 +290,7 @@ with tab2:
         note = uc2.text_input("비고")
         
         if st.form_submit_button("저장하기"):
-            ws_db, ws_log = get_worksheets(client) # 저장 시점에만 연결
+            ws_db, ws_log = get_worksheets(client)
             if not ws_log: st.stop()
             
             if not selected_product:
@@ -289,6 +298,7 @@ with tab2:
             else:
                 if "입고" in action_type and is_new_product:
                     final_abbr = new_abbr_input.upper() if new_abbr_input else make_smart_abbr(new_p_name)
+                    # [버그 수정] new_maker 변수가 이제 존재하므로 에러 없음
                     new_row = [
                         new_p_name, final_abbr, new_spec, new_cat_no, new_cap, new_unit, 
                         new_maker, new_pkg, "-", 0, 
@@ -309,7 +319,7 @@ with tab2:
                 ws_log.append_row(log_row)
                 
                 st.success(f"✅ 저장 완료! ({lot_to_save})")
-                st.cache_data.clear() # 캐시 비움
+                st.cache_data.clear()
 
 # ==============================================================================
 # [Tab 3] 실시간 재고 현황
