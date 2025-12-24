@@ -9,8 +9,8 @@ import re
 import time
 
 # --- 1. 앱 설정 ---
-st.set_page_config(page_title="실험실 재고 관리기 v62", layout="wide")
-st.title("🔬 실험실 재고 관리기 v62 (Fix: NameError)")
+st.set_page_config(page_title="실험실 재고 관리기 v63", layout="wide")
+st.title("🔬 실험실 재고 관리기 v63 (Full Registration)")
 
 # --- 2. 구글 시트 연결 설정 ---
 REAGENT_DB_NAME = "Reagent_DB"
@@ -198,7 +198,7 @@ with tab2:
         # [CASE A] 입고
         if "입고" in action_type:
             if is_new_product:
-                st.markdown("##### 📝 신규 품목 정보")
+                st.markdown("##### 📝 신규 품목 등록")
                 c1, c2, c3 = st.columns(3)
                 new_p_name = c1.text_input("제품명 (필수)*")
                 new_abbr_input = c2.text_input("식별코드 (3글자, 예: DME)", max_chars=3)
@@ -209,10 +209,14 @@ with tab2:
                 new_cap = c5.text_input("용량 (규격)")
                 new_unit = c6.selectbox("단위", ["ea", "box", "ml", "L", "g", "kg", "kit"])
                 
-                # [버그 수정] 제조사(new_maker) 입력칸 복구!
                 c7, c8 = st.columns(2)
                 new_pkg = c7.text_input("포장단위 (예: 10ea/box)")
                 new_maker = c8.text_input("제조사 (Maker)") 
+                
+                # [NEW] 보관위치 및 알림수량 추가
+                c9, c10 = st.columns(2)
+                new_loc = c9.text_input("보관 위치 (예: 냉장 1번칸)")
+                new_alert = c10.number_input("알림 기준 수량 (안전재고)", min_value=0, value=0)
                 
                 st.markdown("---")
                 lc1, lc2, lc3 = st.columns(3)
@@ -232,7 +236,8 @@ with tab2:
                     current_abbr_master = str(info.get('식별코드', '')).strip()
                     if not current_abbr_master: current_abbr_master = make_smart_abbr(selected_product)
                     
-                    st.info(f"ℹ️ Spec: {info['상세 특징']} | Code: **{current_abbr_master}**")
+                    # 정보 표시에 보관위치 추가
+                    st.info(f"ℹ️ Spec: {info['상세 특징']} | 위치: {info['보관 위치']} | Code: **{current_abbr_master}**")
                     auto_lot = generate_internal_lot(current_abbr_master, df_log)
                     st.success(f"🎫 생성된 관리번호: **{auto_lot}**")
                     lot_to_save = auto_lot
@@ -284,10 +289,10 @@ with tab2:
             else:
                 if "입고" in action_type and is_new_product:
                     final_abbr = new_abbr_input.upper() if new_abbr_input else make_smart_abbr(new_p_name)
-                    # [버그 수정] new_maker 변수가 이제 존재하므로 에러 없음
+                    # [NEW] 마스터 DB에 보관위치(new_loc)와 알림수량(new_alert) 저장
                     new_row = [
                         new_p_name, final_abbr, new_spec, new_cat_no, new_cap, new_unit, 
-                        new_maker, new_pkg, "-", 0, 
+                        new_maker, new_pkg, new_loc, new_alert, 
                         datetime.now().strftime("%Y-%m-%d"), user
                     ]
                     ws_db.append_row(new_row)
@@ -329,9 +334,12 @@ with tab3:
 
         try: df_stock['알림 기준 수량'] = pd.to_numeric(df_stock['알림 기준 수량'], errors='coerce').fillna(0)
         except: pass
+        
+        # 재고 부족 알림 (알림 기준 수량보다 적을 때)
         low_stock = df_stock[df_stock['현재고'] <= df_stock['알림 기준 수량']]
         if not low_stock.empty:
-            st.error(f"🚨 재고 부족 ({len(low_stock)}건)")
+            st.error(f"🚨 재고 부족 ({len(low_stock)}건) - 발주 필요")
+            st.dataframe(low_stock[['제품명', '현재고', '알림 기준 수량', '보관 위치']], hide_index=True)
         
         st.subheader("📦 품목별 재고 현황 (Lot 추적)")
         if not df_log.empty:
@@ -359,6 +367,7 @@ with tab4:
             with col1:
                 st.write(f"**현재 식별코드:** `{current_abbr}`")
                 st.write(f"**현재 생성 예시:** `{current_abbr}-2512-01`")
+                st.caption(f"보관 위치: {info['보관 위치']} | 알림 기준: {info['알림 기준 수량']}")
             
             with col2:
                 new_abbr_edit = st.text_input("새로운 식별코드 (3글자 영문)", value=current_abbr, max_chars=3)
@@ -373,4 +382,3 @@ with tab4:
                             st.error("DB 업데이트 실패")
                     else:
                         st.warning("변경 사항이 없거나 코드가 비어있습니다.")
-
