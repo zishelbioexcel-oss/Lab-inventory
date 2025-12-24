@@ -9,8 +9,8 @@ import re
 import time
 
 # --- 1. 앱 설정 ---
-st.set_page_config(page_title="실험실 재고 관리기 v63", layout="wide")
-st.title("🔬 실험실 재고 관리기 v63 (Full Registration)")
+st.set_page_config(page_title="실험실 재고 관리기 v64", layout="wide")
+st.title("🔬 실험실 재고 관리기 v64 (Merge & Fix)")
 
 # --- 2. 구글 시트 연결 설정 ---
 REAGENT_DB_NAME = "Reagent_DB"
@@ -48,16 +48,21 @@ def load_data_only(_client):
                 if col not in df_master.columns:
                     df_master[col] = ""
 
-        # Log DB
+        # Log DB (헤더 변경 반영: 날짜 -> 유효기간)
         sh_log = _client.open(USAGE_LOG_NAME)
         ws_log = sh_log.worksheet(USAGE_LOG_TAB)
         data_log = ws_log.get_all_records()
         
+        # [수정 b] '날짜' 대신 '유효기간'으로 컬럼명 변경
         log_cols = ["일시", "구분", "제품명", "관리번호", "제조사 Lot", "수량", "유효기간", "담당자", "비고"]
         if not data_log:
             df_log = pd.DataFrame(columns=log_cols)
         else:
             df_log = pd.DataFrame(data_log)
+            # 구글 시트 헤더가 아직 '날짜'일 수도 있으니 호환성 처리
+            if "날짜" in df_log.columns and "유효기간" not in df_log.columns:
+                df_log.rename(columns={"날짜": "유효기간"}, inplace=True)
+            
             for col in log_cols:
                 if col not in df_log.columns:
                     df_log[col] = ""
@@ -98,6 +103,7 @@ def generate_internal_lot(abbr, df_log):
         seq = 1
     else:
         if '관리번호' in df_log.columns:
+            # 문자열로 변환 후 검색
             mask = df_log['관리번호'].astype(str).str.startswith(prefix)
             count = mask.sum()
             seq = count + 1
@@ -190,15 +196,18 @@ with tab2:
     
     is_new_product = False
     if "입고" in action_type:
-        is_new_product = col_check.checkbox("🆕 신규 품목 등록")
+        is_new_product = col_check.checkbox("🆕 신규 품목 등록 (목록에 없으면 체크)")
     
     st.divider()
 
-    with st.form("action_form", clear_on_submit=True):
+    # [수정 a] clear_on_submit=False로 변경하여 입력값 유지
+    with st.form("action_form", clear_on_submit=False):
         # [CASE A] 입고
         if "입고" in action_type:
             if is_new_product:
-                st.markdown("##### 📝 신규 품목 등록")
+                st.markdown("##### 📝 신규 품목 정보")
+                st.info("💡 팁: 이미 등록된 제품명을 입력하면, 마스터 DB 중복 생성 없이 자동으로 기존 정보를 불러와 입고합니다.")
+                
                 c1, c2, c3 = st.columns(3)
                 new_p_name = c1.text_input("제품명 (필수)*")
                 new_abbr_input = c2.text_input("식별코드 (3글자, 예: DME)", max_chars=3)
@@ -213,10 +222,9 @@ with tab2:
                 new_pkg = c7.text_input("포장단위 (예: 10ea/box)")
                 new_maker = c8.text_input("제조사 (Maker)") 
                 
-                # [NEW] 보관위치 및 알림수량 추가
                 c9, c10 = st.columns(2)
-                new_loc = c9.text_input("보관 위치 (예: 냉장 1번칸)")
-                new_alert = c10.number_input("알림 기준 수량 (안전재고)", min_value=0, value=0)
+                new_loc = c9.text_input("보관 위치")
+                new_alert = c10.number_input("알림 기준 수량", min_value=0, value=0)
                 
                 st.markdown("---")
                 lc1, lc2, lc3 = st.columns(3)
@@ -236,8 +244,7 @@ with tab2:
                     current_abbr_master = str(info.get('식별코드', '')).strip()
                     if not current_abbr_master: current_abbr_master = make_smart_abbr(selected_product)
                     
-                    # 정보 표시에 보관위치 추가
-                    st.info(f"ℹ️ Spec: {info['상세 특징']} | 위치: {info['보관 위치']} | Code: **{current_abbr_master}**")
+                    st.info(f"ℹ️ Spec: {info['상세 특징']} | Code: **{current_abbr_master}**")
                     auto_lot = generate_internal_lot(current_abbr_master, df_log)
                     st.success(f"🎫 생성된 관리번호: **{auto_lot}**")
                     lot_to_save = auto_lot
@@ -287,21 +294,34 @@ with tab2:
             if not selected_product:
                 st.error("제품명을 입력해주세요.")
             else:
+                # 1. 신규 품목 등록 로직 (중복 방지 적용)
                 if "입고" in action_type and is_new_product:
-                    final_abbr = new_abbr_input.upper() if new_abbr_input else make_smart_abbr(new_p_name)
-                    # [NEW] 마스터 DB에 보관위치(new_loc)와 알림수량(new_alert) 저장
-                    new_row = [
-                        new_p_name, final_abbr, new_spec, new_cat_no, new_cap, new_unit, 
-                        new_maker, new_pkg, new_loc, new_alert, 
-                        datetime.now().strftime("%Y-%m-%d"), user
-                    ]
-                    ws_db.append_row(new_row)
-                    st.toast(f"✨ 신규 품목 등록 완료!")
-                    lot_to_save = generate_internal_lot(final_abbr, df_log)
+                    # [수정 c] 중복 체크: 이미 마스터 DB에 있는 제품명인가?
+                    if new_p_name in df_master['제품명'].values:
+                        st.warning(f"⚠️ '{new_p_name}'은(는) 이미 마스터 DB에 존재합니다. 기존 식별코드를 사용하여 입고합니다.")
+                        # 기존 정보 불러오기
+                        existing_info = df_master[df_master['제품명'] == new_p_name].iloc[0]
+                        final_abbr = str(existing_info.get('식별코드', ''))
+                        if not final_abbr: final_abbr = make_smart_abbr(new_p_name)
+                        
+                        # 마스터 DB 추가(append)는 건너뜀 (중복 방지)
+                        lot_to_save = generate_internal_lot(final_abbr, df_log)
+                    else:
+                        # 진짜 새로운 제품일 때만 마스터 DB에 등록
+                        final_abbr = new_abbr_input.upper() if new_abbr_input else make_smart_abbr(new_p_name)
+                        new_row = [
+                            new_p_name, final_abbr, new_spec, new_cat_no, new_cap, new_unit, 
+                            new_maker, new_pkg, new_loc, new_alert, 
+                            datetime.now().strftime("%Y-%m-%d"), user
+                        ]
+                        ws_db.append_row(new_row)
+                        st.toast(f"✨ 신규 품목 '{new_p_name}' 등록 완료!")
+                        lot_to_save = generate_internal_lot(final_abbr, df_log)
 
                 final_qty = qty if "입고" in action_type else -qty
                 action_code = "IN" if "입고" in action_type else "OUT"
                 
+                # [수정 b] 날짜 -> 유효기간 컬럼명 변경 고려 (로그 저장에는 영향 없으나 의미 명확화)
                 log_row = [
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     action_code, selected_product, lot_to_save, mfg_lot,
@@ -309,8 +329,8 @@ with tab2:
                 ]
                 ws_log.append_row(log_row)
                 
-                st.success(f"✅ 저장 완료! ({lot_to_save})")
-                st.cache_data.clear()
+                st.success(f"✅ 저장 완료! ({lot_to_save}) - 입력 내용은 유지됩니다.")
+                st.cache_data.clear() # 캐시 비움
 
 # ==============================================================================
 # [Tab 3] 실시간 재고 현황
@@ -334,8 +354,6 @@ with tab3:
 
         try: df_stock['알림 기준 수량'] = pd.to_numeric(df_stock['알림 기준 수량'], errors='coerce').fillna(0)
         except: pass
-        
-        # 재고 부족 알림 (알림 기준 수량보다 적을 때)
         low_stock = df_stock[df_stock['현재고'] <= df_stock['알림 기준 수량']]
         if not low_stock.empty:
             st.error(f"🚨 재고 부족 ({len(low_stock)}건) - 발주 필요")
@@ -346,6 +364,7 @@ with tab3:
             df_log['관리번호'] = df_log['관리번호'].replace("", "Old-Data")
             lot_stock = df_log.groupby(['제품명', '관리번호', '제조사 Lot'])['수량'].sum().reset_index()
             active_lots = lot_stock[lot_stock['수량'] > 0].sort_values('제품명')
+            # [수정 b] 컬럼명 표시 시 '날짜'가 아닌 '유효기간'이 보이도록
             st.dataframe(active_lots, use_container_width=True)
 
 # ==============================================================================
