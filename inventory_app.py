@@ -6,10 +6,11 @@ from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
 from datetime import datetime
 import re
+import time
 
 # --- 1. 앱 설정 ---
-st.set_page_config(page_title="실험실 재고 관리기 v60", layout="wide")
-st.title("🔬 실험실 재고 관리기 v60 (Code Manager)")
+st.set_page_config(page_title="실험실 재고 관리기 v61", layout="wide")
+st.title("🔬 실험실 재고 관리기 v61 (Stable & Fast)")
 
 # --- 2. 구글 시트 연결 설정 ---
 REAGENT_DB_NAME = "Reagent_DB"
@@ -21,45 +22,66 @@ USAGE_LOG_TAB = "Log"
 def get_gspread_client():
     try:
         scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        # secrets.toml에서 정보를 가져옵니다
         if 'gcp_json_base64' in st.secrets:
             creds = ServiceAccountCredentials.from_json_keyfile_dict(
                 json.loads(base64.b64decode(st.secrets["gcp_json_base64"]).decode("utf-8")), scope)
         else:
+            # 로컬 개발 환경용 (혹시 파일이 있다면)
             creds = ServiceAccountCredentials.from_service_account_file('.streamlit/secrets.toml', scope)
         return gspread.authorize(creds), None
     except Exception as e:
         return None, f"인증 오류: {e}"
 
-def load_data(client):
-    # Master DB
-    sh_db = client.open(REAGENT_DB_NAME)
-    ws_db = sh_db.worksheet(REAGENT_DB_TAB)
-    data_db = ws_db.get_all_records()
-    expected_cols = ["제품명", "식별코드", "상세 특징", "Cat. No.", "규격(용량)", "단위", "제조사", "포장단위", "보관 위치", "알림 기준 수량", "등록일", "등록자"]
-    
-    if not data_db:
-        df_master = pd.DataFrame(columns=expected_cols)
-    else:
-        df_master = pd.DataFrame(data_db)
-        for col in expected_cols:
-            if col not in df_master.columns:
-                df_master[col] = ""
+# [핵심 수정] 데이터 읽기 전용 함수 (캐싱 적용: 5초 동안은 다시 부르지 않음)
+# 이렇게 해야 버튼 누를 때마다 API 에러가 나는 것을 막을 수 있습니다.
+@st.cache_data(ttl=5)
+def load_data_only(_client):
+    try:
+        # Master DB 읽기
+        sh_db = _client.open(REAGENT_DB_NAME)
+        ws_db = sh_db.worksheet(REAGENT_DB_TAB)
+        data_db = ws_db.get_all_records()
+        
+        expected_cols = ["제품명", "식별코드", "상세 특징", "Cat. No.", "규격(용량)", "단위", "제조사", "포장단위", "보관 위치", "알림 기준 수량", "등록일", "등록자"]
+        if not data_db:
+            df_master = pd.DataFrame(columns=expected_cols)
+        else:
+            df_master = pd.DataFrame(data_db)
+            for col in expected_cols:
+                if col not in df_master.columns:
+                    df_master[col] = ""
 
-    # Log DB
-    sh_log = client.open(USAGE_LOG_NAME)
-    ws_log = sh_log.worksheet(USAGE_LOG_TAB)
-    data_log = ws_log.get_all_records()
-    
-    log_cols = ["일시", "구분", "제품명", "관리번호", "제조사 Lot", "수량", "유효기간", "담당자", "비고"]
-    if not data_log:
-        df_log = pd.DataFrame(columns=log_cols)
-    else:
-        df_log = pd.DataFrame(data_log)
-        for col in log_cols:
-            if col not in df_log.columns:
-                df_log[col] = "" 
-    
-    return df_master, df_log, ws_db, ws_log
+        # Log DB 읽기
+        sh_log = _client.open(USAGE_LOG_NAME)
+        ws_log = sh_log.worksheet(USAGE_LOG_TAB)
+        data_log = ws_log.get_all_records()
+        
+        log_cols = ["일시", "구분", "제품명", "관리번호", "제조사 Lot", "수량", "유효기간", "담당자", "비고"]
+        if not data_log:
+            df_log = pd.DataFrame(columns=log_cols)
+        else:
+            df_log = pd.DataFrame(data_log)
+            for col in log_cols:
+                if col not in df_log.columns:
+                    df_log[col] = ""
+        
+        return df_master, df_log, None
+    except Exception as e:
+        return pd.DataFrame(), pd.DataFrame(), str(e)
+
+# [핵심 수정] 쓰기 전용 함수 (저장할 때만 시트를 연결함)
+def get_worksheets(client):
+    try:
+        sh_db = client.open(REAGENT_DB_NAME)
+        ws_db = sh_db.worksheet(REAGENT_DB_TAB)
+        
+        sh_log = client.open(USAGE_LOG_NAME)
+        ws_log = sh_log.worksheet(USAGE_LOG_TAB)
+        return ws_db, ws_log
+    except Exception as e:
+        st.error(f"시트 연결 실패: {e}")
+        return None, None
 
 def make_smart_abbr(name):
     if not name: return "UNK"
@@ -95,7 +117,6 @@ def update_master_abbr(client, product_name, new_abbr):
         ws = sh.worksheet(REAGENT_DB_TAB)
         cell = ws.find(product_name, in_column=1)
         if cell:
-            # B열(2번째 열)이 식별코드라고 가정
             ws.update_cell(cell.row, 2, new_abbr)
             return True
         return False
@@ -106,15 +127,20 @@ def update_master_abbr(client, product_name, new_abbr):
 client, err = get_gspread_client()
 if err: st.error(err); st.stop()
 
-# 탭 구조 변경: [코드 관리] 탭 추가
+# 데이터 로드 (캐싱 사용)
+df_master, df_log, load_err = load_data_only(client)
+if load_err:
+    st.error(f"데이터 로딩 실패 (잠시 후 다시 시도하세요): {load_err}")
+    st.stop()
+
+# 탭 구조
 tab1, tab2, tab3, tab4 = st.tabs(["📂 BOM 업로드", "📦 입고/사용", "📊 재고 현황", "⚙️ 품목/코드 관리"])
 
 # ==============================================================================
-# [Tab 1] BOM(품목) 관리 (일괄 업로드)
+# [Tab 1] BOM(품목) 관리
 # ==============================================================================
 with tab1:
     st.header("📂 BOM 마스터 데이터 관리")
-    st.info("초기 세팅이나 대량 변경 시 엑셀을 업로드하세요.")
     with st.expander("엑셀 BOM 업로드", expanded=True):
         uploaded_file = st.file_uploader("정리된 BOM 엑셀 파일 (.xlsx)", type=['xlsx'])
         if uploaded_file:
@@ -130,45 +156,43 @@ with tab1:
             }
             
             if st.button("🚀 기준 정보 덮어쓰기"):
-                try:
-                    sh = client.open(REAGENT_DB_NAME)
-                    ws = sh.worksheet(REAGENT_DB_TAB)
-                    processed = []
-                    header = ["제품명", "식별코드", "상세 특징", "Cat. No.", "규격(용량)", "단위", "제조사", "포장단위", "보관 위치", "알림 기준 수량", "등록일", "등록자"]
-                    processed.append(header)
-                    
-                    for _, row in df_upload.iterrows():
-                        p_name = str(row.get(COL_MAP["제품명"], "")).strip()
-                        if not p_name: continue
+                ws_db, _ = get_worksheets(client) # 저장할 때만 연결
+                if ws_db:
+                    try:
+                        processed = []
+                        header = ["제품명", "식별코드", "상세 특징", "Cat. No.", "규격(용량)", "단위", "제조사", "포장단위", "보관 위치", "알림 기준 수량", "등록일", "등록자"]
+                        processed.append(header)
                         
-                        raw_abbr = str(row.get(COL_MAP["식별코드"], "")).strip()
-                        final_abbr = raw_abbr.upper() if raw_abbr else make_smart_abbr(p_name)
+                        for _, row in df_upload.iterrows():
+                            p_name = str(row.get(COL_MAP["제품명"], "")).strip()
+                            if not p_name: continue
+                            
+                            raw_abbr = str(row.get(COL_MAP["식별코드"], "")).strip()
+                            final_abbr = raw_abbr.upper() if raw_abbr else make_smart_abbr(p_name)
 
-                        try: safe_stock = float(str(row.get(COL_MAP["알림 기준 수량"], 0)).replace("-","0").replace(",",""))
-                        except: safe_stock = 0.0
+                            try: safe_stock = float(str(row.get(COL_MAP["알림 기준 수량"], 0)).replace("-","0").replace(",",""))
+                            except: safe_stock = 0.0
 
-                        processed.append([
-                            p_name, final_abbr,
-                            str(row.get(COL_MAP["상세 특징"], "-")), str(row.get(COL_MAP["Cat. No."], "-")),
-                            str(row.get(COL_MAP["규격(용량)"], "-")), str(row.get(COL_MAP["단위"], "ea")),
-                            str(row.get(COL_MAP["제조사"], "-")), str(row.get(COL_MAP["포장단위"], "-")),
-                            str(row.get(COL_MAP["보관 위치"], "-")), safe_stock,
-                            datetime.now().strftime("%Y-%m-%d"), "관리자(일괄)"
-                        ])
-                    ws.clear()
-                    ws.update(processed)
-                    st.success(f"✅ 기준 정보 등록 완료!")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"업로드 실패: {e}")
+                            processed.append([
+                                p_name, final_abbr,
+                                str(row.get(COL_MAP["상세 특징"], "-")), str(row.get(COL_MAP["Cat. No."], "-")),
+                                str(row.get(COL_MAP["규격(용량)"], "-")), str(row.get(COL_MAP["단위"], "ea")),
+                                str(row.get(COL_MAP["제조사"], "-")), str(row.get(COL_MAP["포장단위"], "-")),
+                                str(row.get(COL_MAP["보관 위치"], "-")), safe_stock,
+                                datetime.now().strftime("%Y-%m-%d"), "관리자(일괄)"
+                            ])
+                        ws_db.clear()
+                        ws_db.update(processed)
+                        st.success(f"✅ 기준 정보 등록 완료!")
+                        st.cache_data.clear() # 캐시 초기화 (새 데이터 반영 위해)
+                    except Exception as e:
+                        st.error(f"업로드 실패: {e}")
 
 # ==============================================================================
-# [Tab 2] 입고 및 사용 등록 (입고 시 코드수정 기능 제거 -> 단순화)
+# [Tab 2] 입고 및 사용 등록
 # ==============================================================================
 with tab2:
     st.header("📦 자재 수불 관리")
-    
-    df_master, df_log, ws_db, ws_log = load_data(client)
     
     col_type, col_check = st.columns([1, 2])
     action_type = col_type.radio("작업 유형", ["🔵 입고 (구매/채워넣기)", "🔴 사용 (소진/출고)"])
@@ -180,15 +204,12 @@ with tab2:
     st.divider()
 
     with st.form("action_form", clear_on_submit=True):
-        
         # [CASE A] 입고
         if "입고" in action_type:
-            
             if is_new_product:
                 st.markdown("##### 📝 신규 품목 정보")
                 c1, c2, c3 = st.columns(3)
                 new_p_name = c1.text_input("제품명 (필수)*")
-                # 신규 등록 시에는 코드를 정해야 하므로 입력창 유지
                 new_abbr_input = c2.text_input("식별코드 (3글자, 예: DME)", max_chars=3)
                 new_cat_no = c3.text_input("Cat. No.")
                 
@@ -206,26 +227,19 @@ with tab2:
                 
                 selected_product = new_p_name
                 lot_to_save = "AUTO" 
-
-            else: # 기존 품목 입고
+            else: 
                 if df_master.empty: st.stop()
                 selected_product = st.selectbox("품목 선택", sorted(df_master['제품명'].unique()))
-                
                 mfg_lot = "" 
                 
                 if selected_product:
                     info = df_master[df_master['제품명'] == selected_product].iloc[0]
-                    # 마스터에서 식별코드를 가져옴 (여기서는 수정 불가, 수정은 Tab 4에서)
                     current_abbr_master = str(info.get('식별코드', '')).strip()
-                    if not current_abbr_master: 
-                        current_abbr_master = make_smart_abbr(selected_product)
+                    if not current_abbr_master: current_abbr_master = make_smart_abbr(selected_product)
                     
-                    st.info(f"ℹ️ Spec: {info['상세 특징']} | Cat: {info['Cat. No.']} | Code: **{current_abbr_master}**")
-                    
-                    # 자동 생성 (읽기 전용)
+                    st.info(f"ℹ️ Spec: {info['상세 특징']} | Code: **{current_abbr_master}**")
                     auto_lot = generate_internal_lot(current_abbr_master, df_log)
-                    st.success(f"🎫 생성된 관리번호: **{auto_lot}** (자동 지정됨)")
-                    
+                    st.success(f"🎫 생성된 관리번호: **{auto_lot}**")
                     lot_to_save = auto_lot
                 
                 st.markdown("---")
@@ -234,12 +248,11 @@ with tab2:
                 mfg_lot = lc2.text_input("제조사 Lot 번호 (필수)", help="시약병에 적힌 번호")
                 expiry_input = lc3.date_input("유효기간").strftime("%Y-%m-%d")
 
-        # [CASE B] 사용 (출고)
+        # [CASE B] 사용
         else:
             if df_master.empty: st.stop()
             selected_product = st.selectbox("품목 선택", sorted(df_master['제품명'].unique()))
             mfg_lot = "-" 
-            
             existing_lots = ["Initial"]
             lot_map = {} 
 
@@ -249,8 +262,7 @@ with tab2:
                     for _, row in log_in.iterrows():
                         internal = str(row.get('관리번호', ''))
                         mfg = str(row.get('제조사 Lot', ''))
-                        if internal:
-                            lot_map[internal] = mfg
+                        if internal: lot_map[internal] = mfg
                     found = sorted(list(lot_map.keys()))
                     if found: existing_lots = found
             
@@ -262,7 +274,6 @@ with tab2:
             if lot_to_save != "Initial":
                 st.info(f"🔎 추적된 제조사 Lot: **[{matched_mfg_lot}]**")
                 mfg_lot = matched_mfg_lot
-            
             expiry_input = "-" 
 
         uc1, uc2 = st.columns(2)
@@ -270,10 +281,12 @@ with tab2:
         note = uc2.text_input("비고")
         
         if st.form_submit_button("저장하기"):
+            ws_db, ws_log = get_worksheets(client) # 저장 시점에만 연결
+            if not ws_log: st.stop()
+            
             if not selected_product:
                 st.error("제품명을 입력해주세요.")
             else:
-                # 1. 신규 품목 등록
                 if "입고" in action_type and is_new_product:
                     final_abbr = new_abbr_input.upper() if new_abbr_input else make_smart_abbr(new_p_name)
                     new_row = [
@@ -285,7 +298,6 @@ with tab2:
                     st.toast(f"✨ 신규 품목 등록 완료!")
                     lot_to_save = generate_internal_lot(final_abbr, df_log)
 
-                # 2. 로그 저장
                 final_qty = qty if "입고" in action_type else -qty
                 action_code = "IN" if "입고" in action_type else "OUT"
                 
@@ -297,16 +309,16 @@ with tab2:
                 ws_log.append_row(log_row)
                 
                 st.success(f"✅ 저장 완료! ({lot_to_save})")
-                st.cache_data.clear()
+                st.cache_data.clear() # 캐시 비움
 
 # ==============================================================================
 # [Tab 3] 실시간 재고 현황
 # ==============================================================================
 with tab3:
     st.header("📊 실시간 재고 현황")
-    if st.button("🔄 새로고침"): st.rerun()
-    
-    df_master, df_log, _, _ = load_data(client)
+    if st.button("🔄 새로고침"):
+        st.cache_data.clear()
+        st.rerun()
     
     if not df_master.empty:
         if df_log.empty:
@@ -333,18 +345,14 @@ with tab3:
             st.dataframe(active_lots, use_container_width=True)
 
 # ==============================================================================
-# [Tab 4] 품목/코드 관리 (신규 기능)
+# [Tab 4] 품목/코드 관리
 # ==============================================================================
 with tab4:
     st.header("⚙️ 기준 정보 및 식별코드 관리")
-    st.info("여기서 '식별코드(3글자)'를 수정하면, 앞으로 입고되는 물품의 관리번호가 변경됩니다.")
-    
-    df_master, _, _, _ = load_data(client)
     
     if df_master.empty:
         st.warning("등록된 품목이 없습니다.")
     else:
-        # 1. 수정할 품목 선택
         target_product = st.selectbox("수정할 품목 선택", sorted(df_master['제품명'].unique()))
         
         if target_product:
@@ -357,20 +365,15 @@ with tab4:
                 st.write(f"**현재 생성 예시:** `{current_abbr}-2512-01`")
             
             with col2:
-                # 식별코드 변경 입력창
                 new_abbr_edit = st.text_input("새로운 식별코드 (3글자 영문)", value=current_abbr, max_chars=3)
                 
                 if st.button("💾 식별코드 변경사항 저장"):
-                    if not new_abbr_edit:
-                        st.error("코드를 입력하세요.")
-                    elif new_abbr_edit == current_abbr:
-                        st.warning("변경 사항이 없습니다.")
-                    else:
-                        # 마스터 DB 업데이트
+                    if new_abbr_edit and new_abbr_edit != current_abbr:
                         success = update_master_abbr(client, target_product, new_abbr_edit.upper())
                         if success:
                             st.success(f"✅ 변경 완료! ({current_abbr} → {new_abbr_edit.upper()})")
-                            st.caption("이제부터 입고 시 새로운 코드가 적용됩니다.")
-                            st.cache_data.clear() # 캐시 비워서 즉시 반영
+                            st.cache_data.clear()
                         else:
-                            st.error("DB 업데이트에 실패했습니다.")
+                            st.error("DB 업데이트 실패")
+                    else:
+                        st.warning("변경 사항이 없거나 코드가 비어있습니다.")
