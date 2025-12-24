@@ -4,13 +4,13 @@ import json
 import base64
 from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 import time
 
 # --- 1. 앱 설정 ---
-st.set_page_config(page_title="실험실 재고 관리기 v64", layout="wide")
-st.title("🔬 실험실 재고 관리기 v64 (Merge & Fix)")
+st.set_page_config(page_title="실험실 재고 관리기 v65", layout="wide")
+st.title("🔬 실험실 재고 관리기 v65 (Expiry Alert)")
 
 # --- 2. 구글 시트 연결 설정 ---
 REAGENT_DB_NAME = "Reagent_DB"
@@ -48,18 +48,17 @@ def load_data_only(_client):
                 if col not in df_master.columns:
                     df_master[col] = ""
 
-        # Log DB (헤더 변경 반영: 날짜 -> 유효기간)
+        # Log DB
         sh_log = _client.open(USAGE_LOG_NAME)
         ws_log = sh_log.worksheet(USAGE_LOG_TAB)
         data_log = ws_log.get_all_records()
         
-        # [수정 b] '날짜' 대신 '유효기간'으로 컬럼명 변경
         log_cols = ["일시", "구분", "제품명", "관리번호", "제조사 Lot", "수량", "유효기간", "담당자", "비고"]
         if not data_log:
             df_log = pd.DataFrame(columns=log_cols)
         else:
             df_log = pd.DataFrame(data_log)
-            # 구글 시트 헤더가 아직 '날짜'일 수도 있으니 호환성 처리
+            # '날짜' 컬럼이 남아있다면 '유효기간'으로 이름 변경 (호환성)
             if "날짜" in df_log.columns and "유효기간" not in df_log.columns:
                 df_log.rename(columns={"날짜": "유효기간"}, inplace=True)
             
@@ -75,7 +74,6 @@ def get_worksheets(client):
     try:
         sh_db = client.open(REAGENT_DB_NAME)
         ws_db = sh_db.worksheet(REAGENT_DB_TAB)
-        
         sh_log = client.open(USAGE_LOG_NAME)
         ws_log = sh_log.worksheet(USAGE_LOG_TAB)
         return ws_db, ws_log
@@ -103,7 +101,6 @@ def generate_internal_lot(abbr, df_log):
         seq = 1
     else:
         if '관리번호' in df_log.columns:
-            # 문자열로 변환 후 검색
             mask = df_log['관리번호'].astype(str).str.startswith(prefix)
             count = mask.sum()
             seq = count + 1
@@ -190,7 +187,6 @@ with tab1:
 # ==============================================================================
 with tab2:
     st.header("📦 자재 수불 관리")
-    
     col_type, col_check = st.columns([1, 2])
     action_type = col_type.radio("작업 유형", ["🔵 입고 (구매/채워넣기)", "🔴 사용 (소진/출고)"])
     
@@ -200,9 +196,7 @@ with tab2:
     
     st.divider()
 
-    # [수정 a] clear_on_submit=False로 변경하여 입력값 유지
     with st.form("action_form", clear_on_submit=False):
-        # [CASE A] 입고
         if "입고" in action_type:
             if is_new_product:
                 st.markdown("##### 📝 신규 품목 정보")
@@ -210,7 +204,7 @@ with tab2:
                 
                 c1, c2, c3 = st.columns(3)
                 new_p_name = c1.text_input("제품명 (필수)*")
-                new_abbr_input = c2.text_input("식별코드 (3글자, 예: DME)", max_chars=3)
+                new_abbr_input = c2.text_input("식별코드 (3글자)", max_chars=3)
                 new_cat_no = c3.text_input("Cat. No.")
                 
                 c4, c5, c6 = st.columns(3)
@@ -219,8 +213,8 @@ with tab2:
                 new_unit = c6.selectbox("단위", ["ea", "box", "ml", "L", "g", "kg", "kit"])
                 
                 c7, c8 = st.columns(2)
-                new_pkg = c7.text_input("포장단위 (예: 10ea/box)")
-                new_maker = c8.text_input("제조사 (Maker)") 
+                new_pkg = c7.text_input("포장단위")
+                new_maker = c8.text_input("제조사") 
                 
                 c9, c10 = st.columns(2)
                 new_loc = c9.text_input("보관 위치")
@@ -255,8 +249,7 @@ with tab2:
                 mfg_lot = lc2.text_input("제조사 Lot 번호 (필수)", help="시약병에 적힌 번호")
                 expiry_input = lc3.date_input("유효기간").strftime("%Y-%m-%d")
 
-        # [CASE B] 사용
-        else:
+        else: # 사용
             if df_master.empty: st.stop()
             selected_product = st.selectbox("품목 선택", sorted(df_master['제품명'].unique()))
             mfg_lot = "-" 
@@ -294,20 +287,14 @@ with tab2:
             if not selected_product:
                 st.error("제품명을 입력해주세요.")
             else:
-                # 1. 신규 품목 등록 로직 (중복 방지 적용)
                 if "입고" in action_type and is_new_product:
-                    # [수정 c] 중복 체크: 이미 마스터 DB에 있는 제품명인가?
                     if new_p_name in df_master['제품명'].values:
-                        st.warning(f"⚠️ '{new_p_name}'은(는) 이미 마스터 DB에 존재합니다. 기존 식별코드를 사용하여 입고합니다.")
-                        # 기존 정보 불러오기
+                        st.warning(f"⚠️ '{new_p_name}'은(는) 이미 존재합니다. 기존 식별코드를 사용합니다.")
                         existing_info = df_master[df_master['제품명'] == new_p_name].iloc[0]
                         final_abbr = str(existing_info.get('식별코드', ''))
                         if not final_abbr: final_abbr = make_smart_abbr(new_p_name)
-                        
-                        # 마스터 DB 추가(append)는 건너뜀 (중복 방지)
                         lot_to_save = generate_internal_lot(final_abbr, df_log)
                     else:
-                        # 진짜 새로운 제품일 때만 마스터 DB에 등록
                         final_abbr = new_abbr_input.upper() if new_abbr_input else make_smart_abbr(new_p_name)
                         new_row = [
                             new_p_name, final_abbr, new_spec, new_cat_no, new_cap, new_unit, 
@@ -321,7 +308,6 @@ with tab2:
                 final_qty = qty if "입고" in action_type else -qty
                 action_code = "IN" if "입고" in action_type else "OUT"
                 
-                # [수정 b] 날짜 -> 유효기간 컬럼명 변경 고려 (로그 저장에는 영향 없으나 의미 명확화)
                 log_row = [
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     action_code, selected_product, lot_to_save, mfg_lot,
@@ -329,8 +315,8 @@ with tab2:
                 ]
                 ws_log.append_row(log_row)
                 
-                st.success(f"✅ 저장 완료! ({lot_to_save}) - 입력 내용은 유지됩니다.")
-                st.cache_data.clear() # 캐시 비움
+                st.success(f"✅ 저장 완료! ({lot_to_save})")
+                st.cache_data.clear()
 
 # ==============================================================================
 # [Tab 3] 실시간 재고 현황
@@ -342,30 +328,97 @@ with tab3:
         st.rerun()
     
     if not df_master.empty:
+        # 1. 재고 데이터 가공
         if df_log.empty:
             df_stock = df_master.copy()
             df_stock['현재고'] = 0
+            df_active_lots = pd.DataFrame()
         else:
             df_log['수량'] = pd.to_numeric(df_log['수량'], errors='coerce').fillna(0)
+            
+            # [A] 전체 재고량 계산
             stock_grp = df_log.groupby('제품명')['수량'].sum().reset_index()
             stock_grp.rename(columns={'수량': '현재고'}, inplace=True)
             df_stock = pd.merge(df_master, stock_grp, on='제품명', how='left')
             df_stock['현재고'] = df_stock['현재고'].fillna(0).astype(int)
 
-        try: df_stock['알림 기준 수량'] = pd.to_numeric(df_stock['알림 기준 수량'], errors='coerce').fillna(0)
-        except: pass
-        low_stock = df_stock[df_stock['현재고'] <= df_stock['알림 기준 수량']]
-        if not low_stock.empty:
-            st.error(f"🚨 재고 부족 ({len(low_stock)}건) - 발주 필요")
-            st.dataframe(low_stock[['제품명', '현재고', '알림 기준 수량', '보관 위치']], hide_index=True)
-        
-        st.subheader("📦 품목별 재고 현황 (Lot 추적)")
-        if not df_log.empty:
+            # [B] 유효기간 정보 매핑 (입고 기록에서 가져오기)
+            # 제품명+관리번호를 키로 하여 최신 유효기간을 찾습니다.
+            df_in = df_log[df_log['구분'] == 'IN'].copy()
+            # 유효기간이 있는 데이터만 필터링
+            df_in = df_in[df_in['유효기간'].astype(str).str.len() > 5] 
+            # 중복 제거 (같은 Lot면 유효기간 같다고 가정, 최신값 사용)
+            expiry_map = df_in.drop_duplicates(subset=['제품명', '관리번호'], keep='last')[['제품명', '관리번호', '유효기간']]
+
+            # [C] 상세 Lot별 재고 계산 + 유효기간 병합
             df_log['관리번호'] = df_log['관리번호'].replace("", "Old-Data")
             lot_stock = df_log.groupby(['제품명', '관리번호', '제조사 Lot'])['수량'].sum().reset_index()
-            active_lots = lot_stock[lot_stock['수량'] > 0].sort_values('제품명')
-            # [수정 b] 컬럼명 표시 시 '날짜'가 아닌 '유효기간'이 보이도록
-            st.dataframe(active_lots, use_container_width=True)
+            
+            # 재고가 있는 것만 + 유효기간 정보 합치기
+            df_active_lots = pd.merge(lot_stock, expiry_map, on=['제품명', '관리번호'], how='left')
+            df_active_lots = df_active_lots[df_active_lots['수량'] > 0].sort_values('제품명')
+            df_active_lots['유효기간'] = df_active_lots['유효기간'].fillna("-")
+
+        # 2. 알림 및 시각화
+        try: df_stock['알림 기준 수량'] = pd.to_numeric(df_stock['알림 기준 수량'], errors='coerce').fillna(0)
+        except: pass
+        
+        # [알림 1] 재고 부족
+        low_stock = df_stock[df_stock['현재고'] <= df_stock['알림 기준 수량']]
+        
+        # [알림 2] 유효기간 만료/임박 체크
+        expired_items = []
+        near_expiry_items = []
+        today = datetime.now().date()
+        
+        if not df_active_lots.empty:
+            for _, row in df_active_lots.iterrows():
+                try:
+                    # 유효기간 문자열을 날짜로 변환
+                    exp_date_str = str(row['유효기간'])
+                    if len(exp_date_str) >= 10: # YYYY-MM-DD 형식 체크
+                        exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+                        delta = (exp_date - today).days
+                        
+                        item_info = {
+                            "제품명": row['제품명'],
+                            "관리번호": row['관리번호'],
+                            "유효기간": exp_date_str,
+                            "남은일수": delta
+                        }
+                        
+                        if delta < 0:
+                            expired_items.append(item_info)
+                        elif delta <= 30:
+                            near_expiry_items.append(item_info)
+                except:
+                    continue # 날짜 형식이 아니면 패스
+
+        # 화면 출력
+        col_alert1, col_alert2 = st.columns(2)
+        
+        with col_alert1:
+            if not low_stock.empty:
+                st.error(f"🚨 재고 부족 ({len(low_stock)}건)")
+                st.dataframe(low_stock[['제품명', '현재고', '알림 기준 수량', '보관 위치']], hide_index=True)
+            
+            if expired_items:
+                st.error(f"💀 유효기간 만료 ({len(expired_items)}건) - 폐기 필요")
+                st.dataframe(pd.DataFrame(expired_items), hide_index=True)
+
+        with col_alert2:
+            if near_expiry_items:
+                st.warning(f"⚠️ 유효기간 임박 (30일 이내, {len(near_expiry_items)}건)")
+                st.dataframe(pd.DataFrame(near_expiry_items), hide_index=True)
+
+        st.divider()
+        st.subheader("📦 품목별 상세 재고 (Lot & 유효기간)")
+        if not df_active_lots.empty:
+            # 컬럼 순서 정리
+            disp_cols = ['제품명', '관리번호', '제조사 Lot', '수량', '유효기간']
+            st.dataframe(df_active_lots[disp_cols], use_container_width=True)
+        else:
+            st.info("현재 보유 중인 재고가 없습니다.")
 
 # ==============================================================================
 # [Tab 4] 품목/코드 관리
